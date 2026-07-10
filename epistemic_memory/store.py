@@ -46,6 +46,9 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys = ON")
         schema = (Path(__file__).parent / "schema.sql").read_text()
         self.conn.executescript(schema)
+        # Rebuild is idempotent and backfills beliefs created by a pre-FTS
+        # schema without mutating the append-only belief rows.
+        self.conn.execute("INSERT INTO beliefs_fts(beliefs_fts) VALUES ('rebuild')")
         self.conn.commit()
 
     def close(self) -> None:
@@ -165,6 +168,127 @@ class Store:
             (entity, attribute),
         ).fetchall()
         return [_row_to_belief(r, is_current=True) for r in rows]
+
+    def _belief_filter_sql(
+        self,
+        *,
+        fts_query: Optional[str],
+        entity: Optional[str],
+        attribute: Optional[str],
+        scopes: Optional[list[str]],
+        invert_scopes: bool,
+        current: Optional[bool],
+        statuses: Optional[list[str]],
+        invert_statuses: bool,
+        source_types: Optional[list[str]],
+        invert_source_types: bool,
+    ) -> tuple[str, str, list[object]]:
+        """Build only code-controlled SQL; every caller value is a parameter."""
+        joins = "JOIN sources s ON s.id = b.source_id"
+        conditions: list[str] = []
+        params: list[object] = []
+
+        if fts_query:
+            joins += " JOIN beliefs_fts ON beliefs_fts.rowid = b.id"
+            conditions.append("beliefs_fts MATCH ?")
+            params.append(fts_query)
+        if entity is not None:
+            conditions.append("b.entity = ?")
+            params.append(entity)
+        if attribute is not None:
+            conditions.append("b.attribute = ?")
+            params.append(attribute)
+
+        def add_set_filter(
+            column: str, values: Optional[list[str]], invert: bool
+        ) -> None:
+            if values is None:
+                return
+            if not values:
+                if not invert:
+                    conditions.append("0")
+                return
+            placeholders = ", ".join("?" for _ in values)
+            operator = "NOT IN" if invert else "IN"
+            conditions.append(f"{column} {operator} ({placeholders})")
+            params.extend(values)
+
+        add_set_filter("b.scope", scopes, invert_scopes)
+        add_set_filter("b.status", statuses, invert_statuses)
+        add_set_filter("s.type", source_types, invert_source_types)
+
+        if current is not None:
+            successor = (
+                "EXISTS (SELECT 1 FROM beliefs newer "
+                "WHERE newer.supersedes_id = b.id)"
+            )
+            conditions.append(f"NOT {successor}" if current else successor)
+
+        where = " AND ".join(conditions) if conditions else "1"
+        return joins, where, params
+
+    def search_beliefs(
+        self,
+        *,
+        fts_query: Optional[str] = None,
+        entity: Optional[str] = None,
+        attribute: Optional[str] = None,
+        scopes: Optional[list[str]] = None,
+        invert_scopes: bool = False,
+        current: Optional[bool] = True,
+        statuses: Optional[list[str]] = None,
+        invert_statuses: bool = False,
+        source_types: Optional[list[str]] = None,
+        invert_source_types: bool = False,
+    ) -> list[tuple[Belief, Source]]:
+        """Return candidates after SQL scope/current/provenance filtering.
+
+        FTS5 is a boolean candidate selector only. Ranking happens later over
+        this already-authorized set, so forbidden documents cannot affect it.
+        """
+        joins, where, params = self._belief_filter_sql(
+            fts_query=fts_query,
+            entity=entity,
+            attribute=attribute,
+            scopes=scopes,
+            invert_scopes=invert_scopes,
+            current=current,
+            statuses=statuses,
+            invert_statuses=invert_statuses,
+            source_types=source_types,
+            invert_source_types=invert_source_types,
+        )
+        current_expr = (
+            "NOT EXISTS (SELECT 1 FROM beliefs newer "
+            "WHERE newer.supersedes_id = b.id)"
+        )
+        rows = self.conn.execute(
+            f"SELECT b.*, {current_expr} AS derived_current, "
+            "s.type AS source_type, s.label AS source_label, "
+            "s.created_at AS source_created_at "
+            f"FROM beliefs b {joins} WHERE {where} ORDER BY b.id",
+            params,
+        ).fetchall()
+        return [
+            (
+                _row_to_belief(row, is_current=bool(row["derived_current"])),
+                Source(
+                    id=row["source_id"],
+                    type=row["source_type"],
+                    label=row["source_label"],
+                    created_at=row["source_created_at"],
+                ),
+            )
+            for row in rows
+        ]
+
+    def count_beliefs(self, **filters) -> int:
+        """Count exclusions without returning their content or identifiers."""
+        joins, where, params = self._belief_filter_sql(**filters)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS count FROM beliefs b {joins} WHERE {where}", params
+        ).fetchone()
+        return int(row["count"])
 
     def belief_chain(self, belief_id: int) -> list[Belief]:
         """Walk supersedes_id backward from belief_id to its root. Oldest first."""

@@ -285,6 +285,18 @@ class TrustPolicy(_PolicyModel):
             )
         if any(strength < 0 for strength in self.status_strength.values()):
             raise ValueError("status_strength values must be non-negative")
+        dead_statuses = {
+            EpistemicStatus.superseded.value,
+            EpistemicStatus.retracted.value,
+            EpistemicStatus.do_not_use.value,
+        }
+        if any(self.status_strength[status] != 0 for status in dead_statuses):
+            raise ValueError("superseded, retracted, and do_not_use must have strength 0")
+        if any(
+            self.status_strength[status] == 0
+            for status in expected_statuses - dead_statuses
+        ):
+            raise ValueError("usable epistemic statuses must have positive strength")
         if self.risk_tiers != list(RiskTier):
             raise ValueError("risk_tiers must list all four tiers in increasing order")
         if set(self.gate_rules) != set(RiskTier):
@@ -342,16 +354,144 @@ class GateResult(BaseModel):
     details: list[PolicyReason]
 
 
-class ReceiptLine(BaseModel):
+class RetrievalRequest(BaseModel):
+    """Typed public input for ``MemoryStore.retrieve``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = ""
+    entity: Optional[str] = None
+    attribute: Optional[str] = None
+    scope: str
+    task_type: Optional[str] = None
+    status_floor: Optional[EpistemicStatus] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: str) -> str:
+        return _scope(value)
+
+    @field_validator("entity", "attribute")
+    @classmethod
+    def validate_optional_filter(cls, value: Optional[str], info) -> Optional[str]:
+        return _nonempty(value, info.field_name) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class AssemblyRequest(RetrievalRequest):
+    """Typed public input for ``MemoryStore.assemble``."""
+
+    token_budget: int = Field(default=1024, ge=1)
+
+
+class RankFactors(BaseModel):
+    query_entity_hits: int
+    query_attribute_hits: int
+    query_value_hits: int
+    scope_relevance: int
+    task_relevance: int
+    status_strength: int
+    recency_micros: int
+    tie_break_id: int
+
+
+class RetrievedBelief(BaseModel):
+    belief: Belief
+    source: Source
+    rank: int
+    rank_factors: RankFactors
+    admitted_by: list[str]
+
+
+class DedupDecision(BaseModel):
+    rule_id: str
+    representative_id: int
+    dropped_ids: list[int]
+
+
+class ExclusionSummary(BaseModel):
+    reason_code: str
+    rule_id: str
+    count: int = Field(ge=0)
+    safe_detail: str
+
+
+class RetrievalResult(BaseModel):
+    request: RetrievalRequest
+    agent_id: str
+    authorized: bool
+    effective_scopes: list[str]
+    query_tokens: list[str]
+    items: list[RetrievedBelief]
+    exclusions: list[ExclusionSummary]
+    deduplications: list[DedupDecision]
+
+
+class ConflictGroup(BaseModel):
+    group_id: str
+    entity: str
+    attribute: str
+    belief_ids: list[int]
+    winner_id: Optional[int]
+    rule_id: str
+    reason_code: str
+
+
+class PermissionEntry(BaseModel):
+    entity: str
+    attribute: str
+    action: str
+    decision: GateDecision
+    risk_tier: RiskTier
+    decision_type: str
+    gate: GateResult
+
+
+class ReceiptBelief(BaseModel):
     belief_id: int
     status: EpistemicStatus
     source_id: str
+    source_type: str
     scope: str
-    admitted_by: str
+    admitted_by: list[str]
+    rank: int
+    rank_factors: RankFactors
+    conflict_group_id: Optional[str] = None
+
+
+class TokenMeter(BaseModel):
+    used: int
+    budget: int
+    method: str
+    rule_id: str
+
+
+class MemoryReceipt(BaseModel):
+    included: list[ReceiptBelief]
+    exclusions: list[ExclusionSummary]
+    deduplications: list[DedupDecision]
+    conflict_rule_ids: list[str]
+    permission_rule_ids: list[str]
+    rule_ids: list[str]
+    tokens: TokenMeter
 
 
 class AssembledContext(BaseModel):
+    request: AssemblyRequest
     text: str
-    receipt: list[ReceiptLine]
+    rendered_receipt: str
+    items: list[RetrievedBelief]
+    conflicts: list[ConflictGroup]
+    permissions: list[PermissionEntry]
+    receipt: MemoryReceipt
     tokens_injected: int
-    conflicts: list[str]
+    token_budget: int

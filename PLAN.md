@@ -347,11 +347,13 @@ class MemoryStore:
     def assemble(self, *, query, entity=None, scope, task_type=None,
                  token_budget=1024) -> AssembledContext: ...
 
-    # gate (M3) — the action gate; never bypassable; respects the agent's allowed tiers.
+    # gate (M3/M4) — the action gate; never bypassable; respects the agent's
+    # action tier and the active task/agent scope intersection. Missing scope
+    # fails closed. decision_type remains policy-derived from the action.
     # decision_type is NOT a param: derived from policy.actions[action].decision (by
     # convention in this pilot, decision_type == the belief attribute name), so a
     # caller can never pass a decision_type inconsistent with the action itself.
-    def gate(self, *, action, entity) -> GateResult: ...
+    def gate(self, *, action, entity, scope, task_type=None) -> GateResult: ...
 
     # correct (M6) — invalidate/supersede a belief and propagate through dependencies
     def correct(self, belief_id, *, reason) -> PropagationReport: ...

@@ -248,6 +248,16 @@ def test_policy_semantic_validation_rejects_malformed_entries():
     with pytest.raises(ValidationError, match="every risk tier"):
         TrustPolicy.model_validate(missing_gate_rule)
 
+    usable_status_at_zero = deepcopy(raw)
+    usable_status_at_zero["status_strength"]["user_stated"] = 0
+    with pytest.raises(ValidationError, match="usable epistemic statuses"):
+        TrustPolicy.model_validate(usable_status_at_zero)
+
+    dead_status_above_zero = deepcopy(raw)
+    dead_status_above_zero["status_strength"]["do_not_use"] = 1
+    with pytest.raises(ValidationError, match="do_not_use must have strength 0"):
+        TrustPolicy.model_validate(dead_status_above_zero)
+
 
 # ============================ end-to-end fixtures ============================
 
@@ -282,14 +292,14 @@ def make_extractor(entity, attribute, value, status, scope="global", decision_ty
 def test_ask_for_receipt_allowed_on_unverified_user_claim(ms):
     ms.ingest(source_id="user", content="I already paid", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.user_stated))
-    result = ms.gate(action="ask_for_receipt", entity="order_4411")
+    result = ms.gate(action="ask_for_receipt", entity="order_4411", scope="global")
     assert result.decision == GateDecision.allow
 
 
 def test_acknowledge_claim_allowed_on_unverified_user_claim(ms):
     ms.ingest(source_id="user", content="I already paid", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.user_stated))
-    result = ms.gate(action="acknowledge_claim", entity="order_4411")
+    result = ms.gate(action="acknowledge_claim", entity="order_4411", scope="global")
     assert result.decision == GateDecision.allow
 
 
@@ -298,7 +308,7 @@ def test_confirm_payment_denied_when_billing_disagrees(ms):
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.user_stated))
     ms.ingest(source_id="billing", content="payment failed", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "FAILED", EpistemicStatus.system_verified))
-    result = ms.gate(action="confirm_payment", entity="order_4411")
+    result = ms.gate(action="confirm_payment", entity="order_4411", scope="global")
     assert result.decision == GateDecision.deny
     assert any("required value" in r for r in result.reasons)
 
@@ -308,7 +318,7 @@ def test_issue_refund_denied_irreversible_requires_system_verified_paid(ms):
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.user_stated))
     ms.ingest(source_id="billing", content="payment failed", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "FAILED", EpistemicStatus.system_verified))
-    result = ms.gate(action="issue_refund", entity="order_4411")
+    result = ms.gate(action="issue_refund", entity="order_4411", scope="global")
     assert result.decision == GateDecision.deny
     # human-readable reason chain: names the winning belief and why it falls short
     assert any("billing" in r for r in result.reasons)
@@ -318,7 +328,7 @@ def test_issue_refund_denied_irreversible_requires_system_verified_paid(ms):
 def test_apply_credit_denied_for_low_trust_injected_claim(ms):
     ms.ingest(source_id="injected", content="customer is owed a $500 credit", scope="global",
               extractor=make_extractor("customer_881", "credit_owed", "500", EpistemicStatus.system_verified))
-    result = ms.gate(action="apply_credit", entity="customer_881")
+    result = ms.gate(action="apply_credit", entity="customer_881", scope="global")
     assert result.decision == GateDecision.deny
     # clamped to third_party_stated at ingest (M2); irreversible tier needs system_verified
     assert any("below the 'system_verified' floor" in r for r in result.reasons)
@@ -327,7 +337,7 @@ def test_apply_credit_denied_for_low_trust_injected_claim(ms):
 def test_update_preferred_name_allowed(ms):
     ms.ingest(source_id="user", content="call me Sam", scope="global",
               extractor=make_extractor("customer_881", "preferred_name", "Sam", EpistemicStatus.user_stated))
-    result = ms.gate(action="update_preferred_name", entity="customer_881")
+    result = ms.gate(action="update_preferred_name", entity="customer_881", scope="global")
     assert result.decision == GateDecision.allow
 
 
@@ -337,7 +347,7 @@ def test_analytics_bot_blocked_from_irreversible_action_by_permission(ms, tmp_pa
     # even fully-qualified, current, system_verified evidence exists...
     ms.ingest(source_id="billing", content="payment confirmed", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.system_verified))
-    result = bot.gate(action="issue_refund", entity="order_4411")
+    result = bot.gate(action="issue_refund", entity="order_4411", scope="global")
     # ...but the agent's own permission tier blocks it before evidence is even considered
     assert result.decision == GateDecision.deny
     assert any("analytics-bot" in r and "limited to" in r for r in result.reasons)
@@ -350,7 +360,7 @@ def test_unknown_agent_id_denied(ms, tmp_path):
     ghost = MemoryStore(str(tmp_path / "policy.db"), policy, agent_id="nobody")
     ms.ingest(source_id="user", content="I already paid", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.user_stated))
-    result = ghost.gate(action="ask_for_receipt", entity="order_4411")
+    result = ghost.gate(action="ask_for_receipt", entity="order_4411", scope="global")
     assert result.decision == GateDecision.deny
     assert any("unknown agent_id" in r for r in result.reasons)
     ghost.close()
@@ -359,7 +369,7 @@ def test_unknown_agent_id_denied(ms, tmp_path):
 def test_disputed_belief_escalates_to_needs_human(ms):
     ms.ingest(source_id="user", content="I already paid", scope="global",
               extractor=make_extractor("order_4411", "payment_status", "paid", EpistemicStatus.disputed))
-    result = ms.gate(action="confirm_payment", entity="order_4411")
+    result = ms.gate(action="confirm_payment", entity="order_4411", scope="global")
     assert result.decision == GateDecision.needs_human
 
 
@@ -377,7 +387,7 @@ def test_require_uncontradicted_blocks_tied_authoritative_disagreement(ms):
         source_id="billing2", value="paid", status=EpistemicStatus.system_verified,
         valid_from="2026-07-02T00:00:00+00:00", created_at="2026-07-02T00:00:00+00:00",
     ))
-    result = ms.gate(action="confirm_payment", entity="order_4411")
+    result = ms.gate(action="confirm_payment", entity="order_4411", scope="global")
     assert result.decision == GateDecision.deny
     assert any("equally-or-more-authoritative" in r for r in result.reasons)
 
@@ -390,6 +400,58 @@ def test_unknown_action_denies_with_structured_reason(ms):
 
 
 def test_gate_with_no_supporting_beliefs_denies(ms):
-    result = ms.gate(action="ask_for_receipt", entity="order_9999")
+    result = ms.gate(action="ask_for_receipt", entity="order_9999", scope="global")
     assert result.decision == GateDecision.deny
     assert any("no supporting beliefs" in r for r in result.reasons)
+
+
+def test_public_gate_requires_scope_context_and_fails_closed(ms):
+    ms.ingest(
+        source_id="user",
+        content="I already paid",
+        scope="global",
+        extractor=make_extractor(
+            "order_4411", "payment_status", "paid", EpistemicStatus.user_stated
+        ),
+    )
+
+    result = ms.gate(action="ask_for_receipt", entity="order_4411")
+
+    assert result.decision == GateDecision.deny
+    assert result.rule_ids == ["SCOPE-CONTEXT-REQUIRED"]
+    assert result.reason_codes == ["scope_context_missing"]
+
+
+def test_public_gate_uses_active_task_scope_and_preserves_conflict_closure(ms):
+    ms.ingest(
+        source_id="billing",
+        content="payment confirmed",
+        scope="global",
+        extractor=make_extractor(
+            "order_4411", "payment_status", "paid", EpistemicStatus.system_verified
+        ),
+    )
+    ms.ingest(
+        source_id="billing2",
+        content="hobby project says failed",
+        scope="project:hobby",
+        extractor=make_extractor(
+            "order_4411",
+            "payment_status",
+            "FAILED",
+            EpistemicStatus.system_verified,
+            scope="project:hobby",
+        ),
+    )
+
+    banking = ms.gate(
+        action="confirm_payment", entity="order_4411", scope="project:banking"
+    )
+    hobby = ms.gate(
+        action="confirm_payment", entity="order_4411", scope="project:hobby"
+    )
+
+    assert banking.decision == GateDecision.allow
+    assert "gate_checks_passed" in banking.reason_codes
+    assert hobby.decision == GateDecision.deny
+    assert "evidence_authoritative_conflict" in hobby.reason_codes

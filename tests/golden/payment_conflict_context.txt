@@ -1,0 +1,36 @@
+EPISTEMIC MEMORY CONTEXT
+⚠ CONFLICT [group:"conflict:order_4411:payment_status" | rule:"P-12" | reason:"conflict_detected" | winner:2 | all_sides_retained:true]
+[belief:2 | status:"system_verified" | trust:"verified" | strength:100 | at:"2026-07-04T00:00:00+00:00" | source:"billing"/"billing_system" | scope:"global"] "order_4411"."payment_status" = "FAILED"
+[belief:1 | status:"user_stated" | trust:"unverified" | strength:50 | at:"2026-07-01T00:00:00+00:00" | source:"user"/"user" | scope:"global"] "order_4411"."payment_status" = "paid"
+
+PERMISSIONS
+- action:"acknowledge_claim" | decision:"allow" | risk:"informational" | decision_type:"payment_status" | rules:"G-INFORMATIONAL","P-12" | codes:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed"
+- action:"ask_for_receipt" | decision:"allow" | risk:"informational" | decision_type:"payment_status" | rules:"G-INFORMATIONAL","P-12" | codes:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed"
+- action:"confirm_payment" | decision:"deny" | risk:"high_stakes" | decision_type:"payment_status" | rules:"G-HIGH-STAKES","P-12" | codes:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","evidence_required_value_missing"
+- action:"issue_refund" | decision:"deny" | risk:"irreversible" | decision_type:"payment_status" | rules:"G-IRREVERSIBLE","P-12" | codes:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","evidence_required_value_missing"
+
+MEMORY RECEIPT
+included:
+- belief:2 status:"system_verified" source:"billing"/"billing_system" scope:"global" rank:1 factors:(task=0,status=100,recency=1783123200000000,id=2) admitted:"R-NOQUERY-001","R-SCOPE-EFFECTIVE-001","R-CURRENT-001","R-USABLE-001","R-PROVENANCE-001","R-RANK-001"
+- belief:1 status:"user_stated" source:"user"/"user" scope:"global" rank:2 factors:(task=0,status=50,recency=1782864000000000,id=1) admitted:"R-NOQUERY-001","R-SCOPE-EFFECTIVE-001","R-CURRENT-001","R-USABLE-001","R-PROVENANCE-001","R-RANK-001"
+conflicts:
+- group:"conflict:order_4411:payment_status" beliefs:2,1 winner:2 rule:"P-12" reason:"conflict_detected"
+permissions:
+- action:"acknowledge_claim" decision:"allow" rules:"G-INFORMATIONAL","P-12"
+- action:"ask_for_receipt" decision:"allow" rules:"G-INFORMATIONAL","P-12"
+- action:"confirm_payment" decision:"deny" rules:"G-HIGH-STAKES","P-12"
+- action:"issue_refund" decision:"deny" rules:"G-IRREVERSIBLE","P-12"
+deduplication:
+- none
+exclusions:
+- rule:"R-SCOPE-TASK-001" code:"task_scope_mismatch" count:1 detail:"candidate outside active task scopes"
+- rule:"R-SCOPE-AGENT-001" code:"agent_scope_denied" count:0 detail:"candidate outside agent readable scopes"
+- rule:"R-CURRENT-001" code:"non_current" count:0 detail:"candidate is structurally superseded"
+- rule:"R-USABLE-001" code:"unusable_status" count:0 detail:"candidate status is not usable"
+- rule:"R-STATUS-FLOOR-001" code:"below_status_floor" count:0 detail:"candidate is below the requested policy strength"
+- rule:"R-PROVENANCE-001" code:"provenance_unconfigured" count:0 detail:"candidate source type is not configured"
+- rule:"R-STATUS-CEILING-001" code:"status_exceeds_source_ceiling" count:0 detail:"candidate status exceeds source authority"
+- rule:"R-TIMESTAMP-001" code:"invalid_timestamp" count:0 detail:"candidate timestamp is not rankable"
+- rule:"R-BUDGET-001" code:"token_budget" count:0 detail:"complete belief or conflict block did not fit"
+rules:"R-NOQUERY-001","R-SCOPE-EFFECTIVE-001","R-CURRENT-001","R-USABLE-001","R-PROVENANCE-001","R-RANK-001","R-SCOPE-TASK-001","R-SCOPE-AGENT-001","R-STATUS-FLOOR-001","R-STATUS-CEILING-001","R-TIMESTAMP-001","R-BUDGET-001","P-12","G-INFORMATIONAL","G-HIGH-STAKES","G-IRREVERSIBLE","R-TOKEN-001"
+tokens:used=1150 budget=2000 method="regex_words_and_punctuation_v1" rule="R-TOKEN-001"

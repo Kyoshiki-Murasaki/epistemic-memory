@@ -10,9 +10,21 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .assemble import assemble_context
 from .ingest import Extractor, ingest_event, live_extractor
-from .models import GateResult, IngestResult, TrustPolicy
+from .models import (
+    AssembledContext,
+    AssemblyRequest,
+    GateDecision,
+    GateResult,
+    IngestResult,
+    PolicyReason,
+    RetrievalRequest,
+    RetrievalResult,
+    TrustPolicy,
+)
 from .policy import gate as _gate
+from .retrieve import retrieve_beliefs
 from .store import Store
 
 
@@ -68,32 +80,58 @@ class MemoryStore:
             extractor=extractor,
         )
 
-    def retrieve(
-        self, *, query: str, entity: Optional[str] = None, scope: str,
-        task_type: Optional[str] = None, status_floor: Optional[str] = None,
-    ):
-        raise NotImplementedError("retrieve lands in M4")
+    def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to retrieve (pass policy=load_policy(...))"
+            )
+        return retrieve_beliefs(self._store, self.policy, self.agent_id, request)
 
-    def assemble(
-        self, *, query: str, entity: Optional[str] = None, scope: str,
-        task_type: Optional[str] = None, token_budget: int = 1024,
-    ):
-        raise NotImplementedError("assemble lands in M4")
+    def assemble(self, request: AssemblyRequest) -> AssembledContext:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to assemble (pass policy=load_policy(...))"
+            )
+        return assemble_context(self._store, self.policy, self.agent_id, request)
 
-    def gate(self, *, action: str, entity: str) -> GateResult:
+    def gate(
+        self,
+        *,
+        action: str,
+        entity: str,
+        scope: Optional[str] = None,
+        task_type: Optional[str] = None,
+    ) -> GateResult:
         if self.policy is None:
             raise ValueError("MemoryStore requires a policy to gate (pass policy=load_policy(...))")
         action_spec = self.policy.actions.get(action)
-        supporting = (
-            self._store.current_beliefs(entity, action_spec.decision)
-            if action_spec is not None
-            else []
-        )
-        source_types = {}
-        for belief in supporting:
-            source = self._store.get_source(belief.source_id)
-            if source is not None:
-                source_types[belief.source_id] = source.type
+        if action_spec is None:
+            return _gate(action, [], self.policy, {}, agent_id=self.agent_id)
+        if scope is None:
+            detail = PolicyReason(
+                code="scope_context_missing",
+                rule_id="SCOPE-CONTEXT-REQUIRED",
+                message="active task scope is required for public gate evaluation",
+            )
+            return GateResult(
+                decision=GateDecision.deny,
+                action=action,
+                decision_type=action_spec.decision,
+                risk_tier=action_spec.risk,
+                rule_ids=[detail.rule_id],
+                reason_codes=[detail.code],
+                reasons=[detail.message],
+                details=[detail],
+            )
+
+        retrieval = self.retrieve(RetrievalRequest(
+            entity=entity,
+            attribute=action_spec.decision,
+            scope=scope,
+            task_type=task_type,
+        ))
+        supporting = [item.belief for item in retrieval.items]
+        source_types = {item.source.id: item.source.type for item in retrieval.items}
         return _gate(action, supporting, self.policy, source_types, agent_id=self.agent_id)
 
     def correct(self, belief_id: int, *, reason: str):
