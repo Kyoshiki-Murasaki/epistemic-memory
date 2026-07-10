@@ -1,0 +1,124 @@
+# trust_policy.yaml — the trust matrix + action gate rules for the pilot demo.
+#
+# This file is DATA, not code. A company edits it without touching the engine.
+# policy.py loads it and exposes two PURE functions:
+#   resolve_conflict(beliefs, decision_type) -> winner + rule_id + losers
+#   gate(action, supporting_beliefs)         -> allow | deny | needs_human + reasons
+version: 1
+
+# ---------------------------------------------------------------------------
+# Epistemic status strength (higher = stronger evidence to act on).
+# Used to rank retrieved beliefs and as the gate's `min_status` floors.
+# The three "dead" statuses are strength 0 and can never support an action.
+# ---------------------------------------------------------------------------
+status_strength:
+  system_verified:    100
+  corroborated:        80
+  user_stated:         50
+  promised:            45
+  planned:             40
+  considering:         30
+  third_party_stated:  30
+  ai_inferred:         20
+  mentioned:           10
+  disputed:             5
+  superseded:           0
+  retracted:            0
+  do_not_use:           0
+
+# ---------------------------------------------------------------------------
+# Source ceilings — the strongest status a source TYPE may self-assert.
+# The LLM only PROPOSES a status; the engine clamps it to this ceiling before
+# commit. This is the injection defense: an untrusted channel can never mint a
+# `system_verified` fact, so its beliefs fail every gate above informational.
+# ---------------------------------------------------------------------------
+source_status_ceiling:
+  billing_system:    system_verified
+  crm:               system_verified
+  manager:           corroborated
+  user:              user_stated
+  document:          third_party_stated
+  third_party:       third_party_stated
+  agent_inference:   ai_inferred
+  untrusted_channel: mentioned
+
+# ---------------------------------------------------------------------------
+# Trust matrix — which source TYPE is authoritative for which decision type.
+# resolve_conflict() ranks disagreeing beliefs by `ranking`; the top source
+# present wins. `authoritative` marks the sources a gate may *require*.
+# Fallback when a decision_type is absent: rank by status_strength, then recency.
+# ---------------------------------------------------------------------------
+trust_matrix:
+  payment_status:
+    rule_id: P-12
+    authoritative: [billing_system]
+    ranking: [billing_system, crm, manager, user, agent_inference, third_party]
+  credit_owed:
+    rule_id: P-20
+    authoritative: [billing_system, manager]
+    ranking: [billing_system, manager, user, third_party]
+  preferred_name:
+    rule_id: P-03
+    authoritative: [user]
+    ranking: [user, crm, agent_inference]
+  current_city:
+    rule_id: P-07
+    authoritative: [user]
+    ranking: [user, crm, third_party, agent_inference]
+
+# ---------------------------------------------------------------------------
+# Action gate. Each action maps to a risk tier + the decision type it turns on.
+# `require_value` (optional): the value the authoritative belief must assert.
+#
+# Gate flag meanings:
+#   min_status                 - winner's status strength must be >= this
+#   require_authoritative_source - winner's source must be in trust_matrix.authoritative
+#   require_uncontradicted     - no belief of EQUAL-OR-HIGHER authority may disagree
+#   require_current            - winner must be a live (un-superseded, non-dead) belief
+# ---------------------------------------------------------------------------
+risk_tiers: [informational, low_stakes, high_stakes, irreversible]
+
+gate_rules:
+  informational:
+    min_status: mentioned
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: false
+  low_stakes:
+    min_status: user_stated
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: true
+  high_stakes:
+    min_status: corroborated
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+  irreversible:
+    min_status: system_verified
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+
+actions:
+  acknowledge_claim:     { risk: informational, decision: payment_status }
+  ask_for_receipt:       { risk: informational, decision: payment_status }
+  update_preferred_name: { risk: low_stakes,    decision: preferred_name }
+  confirm_payment:       { risk: high_stakes,   decision: payment_status, require_value: paid }
+  issue_refund:          { risk: irreversible,  decision: payment_status, require_value: paid }
+  apply_credit:          { risk: irreversible,  decision: credit_owed }
+
+# ---------------------------------------------------------------------------
+# Per-agent permissions (D5 / 02_SPEC.md "foundation requirements" #3). Every
+# MemoryStore caller has an agent_id; max_tier caps which action risk tiers the
+# gate will ever allow that agent to request, independent of the evidence.
+# allowed_scopes governs what an agent may READ (wired into retrieve() in M4);
+# '*' after a kind (e.g. 'project:*') means any id under that scope kind.
+# ---------------------------------------------------------------------------
+agents:
+  support-agent:
+    max_tier: irreversible
+    allowed_scopes: ["global", "persona", "project:*", "task_type:*"]
+  analytics-bot:
+    max_tier: informational
+    allowed_scopes: ["global"]

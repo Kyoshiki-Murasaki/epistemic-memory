@@ -1,0 +1,25 @@
+[project]
+name = "epistemic-memory"
+version = "0.1.0"
+description = "A trust-and-governance memory layer for AI agents: not just what it remembers, but whether it is allowed to trust and act on it."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["epistemic_memory*", "demo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
