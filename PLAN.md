@@ -1,6 +1,6 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M3 complete and verified (33 tests passing). `02_SPEC.md`/`03_CLAUDE_CODE_PROMPT.md`/
+Status: **M0–M3 complete and takeover-audited (60 tests passing). `02_SPEC.md`/`03_CLAUDE_CODE_PROMPT.md`/
 `05_ADOPTION_STRATEGY.md` are mutually consistent (11 components, 11-step demo,
 MemGov-Bench in success criteria). Starting M4.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs

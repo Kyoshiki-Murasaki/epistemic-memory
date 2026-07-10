@@ -83,11 +83,17 @@ class MemoryStore:
     def gate(self, *, action: str, entity: str) -> GateResult:
         if self.policy is None:
             raise ValueError("MemoryStore requires a policy to gate (pass policy=load_policy(...))")
-        if action not in self.policy.actions:
-            raise ValueError(f"unknown action: {action!r}")
-        attribute = self.policy.actions[action].decision
-        supporting = self._store.current_beliefs(entity, attribute)
-        source_types = {b.source_id: self._store.get_source(b.source_id).type for b in supporting}
+        action_spec = self.policy.actions.get(action)
+        supporting = (
+            self._store.current_beliefs(entity, action_spec.decision)
+            if action_spec is not None
+            else []
+        )
+        source_types = {}
+        for belief in supporting:
+            source = self._store.get_source(belief.source_id)
+            if source is not None:
+                source_types[belief.source_id] = source.type
         return _gate(action, supporting, self.policy, source_types, agent_id=self.agent_id)
 
     def correct(self, belief_id: int, *, reason: str):

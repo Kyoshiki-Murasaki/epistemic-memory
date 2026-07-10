@@ -5,12 +5,28 @@ MemoryStore.ingest()/gate() (no network calls — fixture extractors only).
 """
 
 from pathlib import Path
+from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from epistemic_memory.core import MemoryStore
-from epistemic_memory.models import Belief, CandidateBelief, EpistemicStatus, GateDecision, Source
-from epistemic_memory.policy import load_policy, resolve_conflict
+from epistemic_memory.models import (
+    ActionSpec,
+    Belief,
+    CandidateBelief,
+    EpistemicStatus,
+    GateDecision,
+    RiskTier,
+    Source,
+    TrustPolicy,
+)
+from epistemic_memory.policy import (
+    PolicyEvaluationError,
+    gate as pure_gate,
+    load_policy,
+    resolve_conflict,
+)
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "trust_policy.yaml")
 
@@ -23,6 +39,7 @@ def make_belief(**overrides) -> Belief:
         entity="order_4411", attribute="payment_status", value="paid",
         status=EpistemicStatus.user_stated, scope="global", source_id="user",
         valid_from="2026-07-01T00:00:00+00:00", created_at="2026-07-01T00:00:00+00:00",
+        is_current=True,
     )
     defaults.update(overrides)
     return Belief(**defaults)
@@ -44,29 +61,192 @@ def test_resolve_conflict_uses_trust_matrix_ranking():
     assert result.contradicted is True
 
 
-def test_resolve_conflict_fallback_ranks_by_strength_then_recency():
+@pytest.mark.parametrize(
+    ("decision_type", "expected_code"),
+    [(None, "decision_type_missing"), ("unmodeled_attr", "decision_type_unknown")],
+)
+def test_resolve_conflict_missing_or_unknown_decision_fails_closed(
+    decision_type, expected_code
+):
     policy = load_policy(POLICY_PATH)
-    older = make_belief(
-        entity="x", attribute="unmodeled_attr", value="a",
-        status=EpistemicStatus.mentioned, source_id="user",
-        valid_from="2026-07-01T00:00:00+00:00",
-    )
-    newer_stronger = make_belief(
-        entity="x", attribute="unmodeled_attr", value="b",
-        status=EpistemicStatus.corroborated, source_id="user",
-        valid_from="2026-07-02T00:00:00+00:00",
-    )
-    result = resolve_conflict(
-        [older, newer_stronger], None, policy, {"user": "user"}
-    )
-    assert result.winner.value == "b"
-    assert result.rule_id.startswith("fallback")
+    belief = make_belief(attribute="unmodeled_attr")
+    with pytest.raises(PolicyEvaluationError) as exc_info:
+        resolve_conflict([belief], decision_type, policy, {"user": "user"})
+    assert exc_info.value.code == expected_code
 
 
 def test_resolve_conflict_no_beliefs_raises():
     policy = load_policy(POLICY_PATH)
     with pytest.raises(ValueError):
         resolve_conflict([], "payment_status", policy, {})
+
+
+def test_resolve_conflict_exact_tie_uses_immutable_id_not_input_order():
+    policy = load_policy(POLICY_PATH)
+    first = make_belief(id=11, source_id="billing1", value="paid",
+                        status=EpistemicStatus.system_verified)
+    second = make_belief(id=12, source_id="billing2", value="FAILED",
+                         status=EpistemicStatus.system_verified)
+    sources = {"billing1": "billing_system", "billing2": "billing_system"}
+    forward = resolve_conflict([first, second], "payment_status", policy, sources)
+    reverse = resolve_conflict([second, first], "payment_status", policy, sources)
+    assert forward.winner.id == reverse.winner.id == 11
+    assert forward.contradicted is reverse.contradicted is True
+    assert forward.reason_code == "conflict_detected"
+
+
+@pytest.mark.parametrize(
+    ("action", "risk_tier", "belief", "source_types"),
+    [
+        (
+            "ask_for_receipt",
+            RiskTier.informational,
+            make_belief(),
+            {"user": "user"},
+        ),
+        (
+            "update_preferred_name",
+            RiskTier.low_stakes,
+            make_belief(entity="customer_881", attribute="preferred_name", value="Sam"),
+            {"user": "user"},
+        ),
+        (
+            "confirm_payment",
+            RiskTier.high_stakes,
+            make_belief(source_id="billing", status=EpistemicStatus.system_verified),
+            {"billing": "billing_system"},
+        ),
+        (
+            "issue_refund",
+            RiskTier.irreversible,
+            make_belief(source_id="billing", status=EpistemicStatus.system_verified),
+            {"billing": "billing_system"},
+        ),
+    ],
+)
+def test_all_four_risk_tiers_are_explicitly_mapped_and_evaluated(
+    action, risk_tier, belief, source_types
+):
+    policy = load_policy(POLICY_PATH)
+    result = pure_gate(
+        action, [belief], policy, source_types, agent_id="support-agent"
+    )
+    assert policy.actions[action].risk == risk_tier
+    assert result.risk_tier == risk_tier
+    assert result.decision == GateDecision.allow
+
+
+def test_gate_missing_agent_fails_before_evidence_evaluation():
+    policy = load_policy(POLICY_PATH)
+    result = pure_gate("ask_for_receipt", [make_belief()], policy, {"user": "user"})
+    assert result.decision == GateDecision.deny
+    assert result.reason_codes[-1] == "agent_missing"
+    assert "evidence_winner_selected" not in result.reason_codes
+
+
+def test_gate_non_current_evidence_fails_closed():
+    policy = load_policy(POLICY_PATH)
+    stale = make_belief(is_current=False)
+    result = pure_gate(
+        "ask_for_receipt", [stale], policy, {"user": "user"},
+        agent_id="support-agent",
+    )
+    assert result.decision == GateDecision.deny
+    assert "evidence_non_current" in result.reason_codes
+    assert "evidence_usable_missing" in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    "status",
+    [EpistemicStatus.superseded, EpistemicStatus.retracted, EpistemicStatus.do_not_use],
+)
+def test_gate_dead_statuses_fail_closed(status):
+    policy = load_policy(POLICY_PATH)
+    result = pure_gate(
+        "ask_for_receipt", [make_belief(status=status)], policy, {"user": "user"},
+        agent_id="support-agent",
+    )
+    assert result.decision == GateDecision.deny
+    assert "evidence_status_unusable" in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("belief", "source_types", "expected_code"),
+    [
+        (make_belief(), {}, "evidence_source_type_missing"),
+        (make_belief(), {"user": "mystery"}, "evidence_source_type_unknown"),
+        (make_belief().model_copy(update={"source_id": ""}), {}, "evidence_source_missing"),
+    ],
+)
+def test_gate_missing_or_unknown_provenance_fails_closed(
+    belief, source_types, expected_code
+):
+    policy = load_policy(POLICY_PATH)
+    result = pure_gate(
+        "ask_for_receipt", [belief], policy, source_types, agent_id="support-agent"
+    )
+    assert result.decision == GateDecision.deny
+    assert expected_code in result.reason_codes
+
+
+def test_gate_irrelevant_decision_evidence_fails_closed():
+    policy = load_policy(POLICY_PATH)
+    irrelevant = make_belief(
+        attribute="shipping_status", source_id="billing",
+        status=EpistemicStatus.system_verified,
+    )
+    result = pure_gate(
+        "confirm_payment", [irrelevant], policy, {"billing": "billing_system"},
+        agent_id="support-agent",
+    )
+    assert result.decision == GateDecision.deny
+    assert "evidence_decision_mismatch" in result.reason_codes
+
+
+def test_gate_rejects_status_above_source_ceiling_using_clamp_policy():
+    policy = load_policy(POLICY_PATH)
+    overclaimed = make_belief(status=EpistemicStatus.system_verified)
+    result = pure_gate(
+        "ask_for_receipt", [overclaimed], policy, {"user": "user"},
+        agent_id="support-agent",
+    )
+    assert result.decision == GateDecision.deny
+    assert "evidence_status_exceeds_source_ceiling" in result.reason_codes
+
+
+def test_gate_unknown_decision_in_unsafe_policy_copy_fails_closed():
+    policy = load_policy(POLICY_PATH)
+    actions = dict(policy.actions)
+    actions["bad_action"] = ActionSpec(
+        risk=RiskTier.informational, decision="unknown_decision"
+    )
+    unsafe_policy = policy.model_copy(update={"actions": actions})
+    result = pure_gate(
+        "bad_action", [make_belief()], unsafe_policy, {"user": "user"},
+        agent_id="support-agent",
+    )
+    assert result.decision == GateDecision.deny
+    assert "decision_type_unknown" in result.reason_codes
+
+
+def test_policy_semantic_validation_rejects_malformed_entries():
+    policy = load_policy(POLICY_PATH)
+    raw = policy.model_dump(mode="json")
+
+    unknown_field = deepcopy(raw)
+    unknown_field["typo"] = True
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        TrustPolicy.model_validate(unknown_field)
+
+    unknown_decision = deepcopy(raw)
+    unknown_decision["actions"]["ask_for_receipt"]["decision"] = "not_configured"
+    with pytest.raises(ValidationError, match="unknown decision type"):
+        TrustPolicy.model_validate(unknown_decision)
+
+    missing_gate_rule = deepcopy(raw)
+    missing_gate_rule["gate_rules"].pop("irreversible")
+    with pytest.raises(ValidationError, match="every risk tier"):
+        TrustPolicy.model_validate(missing_gate_rule)
 
 
 # ============================ end-to-end fixtures ============================
@@ -202,9 +382,11 @@ def test_require_uncontradicted_blocks_tied_authoritative_disagreement(ms):
     assert any("equally-or-more-authoritative" in r for r in result.reasons)
 
 
-def test_unknown_action_raises(ms):
-    with pytest.raises(ValueError):
-        ms.gate(action="not_a_real_action", entity="order_4411")
+def test_unknown_action_denies_with_structured_reason(ms):
+    result = ms.gate(action="not_a_real_action", entity="order_4411")
+    assert result.decision == GateDecision.deny
+    assert result.reason_codes == ["action_unknown"]
+    assert result.rule_ids == ["POLICY-ACTION"]
 
 
 def test_gate_with_no_supporting_beliefs_denies(ms):

@@ -8,6 +8,7 @@ live extractor (ingest.live_extractor) is never invoked here.
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from epistemic_memory.core import MemoryStore
 from epistemic_memory.models import CandidateBelief, EpistemicStatus, Source
@@ -129,3 +130,25 @@ def test_ingest_without_policy_raises(tmp_path):
     with pytest.raises(ValueError):
         m.ingest(source_id="user", content="...", scope="global", extractor=overreaching_user_claim)
     m.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("entity", ""),
+        ("attribute", "   "),
+        ("value", ""),
+        ("scope", "anything-goes"),
+    ],
+)
+def test_candidate_structural_fields_and_scope_are_engine_validated(field, value):
+    data = {
+        "entity": "order_4411",
+        "attribute": "payment_status",
+        "value": "paid",
+        "proposed_status": EpistemicStatus.user_stated,
+        "scope": "global",
+    }
+    data[field] = value
+    with pytest.raises(ValidationError):
+        CandidateBelief.model_validate(data)

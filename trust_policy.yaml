@@ -46,7 +46,8 @@ source_status_ceiling:
 # Trust matrix — which source TYPE is authoritative for which decision type.
 # resolve_conflict() ranks disagreeing beliefs by `ranking`; the top source
 # present wins. `authoritative` marks the sources a gate may *require*.
-# Fallback when a decision_type is absent: rank by status_strength, then recency.
+# Missing or unknown decision types fail closed; every authorizing decision must
+# have an explicit rule here.
 # ---------------------------------------------------------------------------
 trust_matrix:
   payment_status:
@@ -80,21 +81,25 @@ risk_tiers: [informational, low_stakes, high_stakes, irreversible]
 
 gate_rules:
   informational:
+    rule_id: G-INFORMATIONAL
     min_status: mentioned
     require_authoritative_source: false
     require_uncontradicted: false
     require_current: false
   low_stakes:
+    rule_id: G-LOW-STAKES
     min_status: user_stated
     require_authoritative_source: false
     require_uncontradicted: false
     require_current: true
   high_stakes:
+    rule_id: G-HIGH-STAKES
     min_status: corroborated
     require_authoritative_source: true
     require_uncontradicted: true
     require_current: true
   irreversible:
+    rule_id: G-IRREVERSIBLE
     min_status: system_verified
     require_authoritative_source: true
     require_uncontradicted: true
@@ -110,15 +115,15 @@ actions:
 
 # ---------------------------------------------------------------------------
 # Per-agent permissions (D5 / 02_SPEC.md "foundation requirements" #3). Every
-# MemoryStore caller has an agent_id; max_tier caps which action risk tiers the
+# MemoryStore caller has an agent_id; max_action_tier caps which action risk tiers the
 # gate will ever allow that agent to request, independent of the evidence.
 # allowed_scopes governs what an agent may READ (wired into retrieve() in M4);
 # '*' after a kind (e.g. 'project:*') means any id under that scope kind.
 # ---------------------------------------------------------------------------
 agents:
   support-agent:
-    max_tier: irreversible
+    max_action_tier: irreversible
     allowed_scopes: ["global", "persona", "project:*", "task_type:*"]
   analytics-bot:
-    max_tier: informational
+    max_action_tier: informational
     allowed_scopes: ["global"]

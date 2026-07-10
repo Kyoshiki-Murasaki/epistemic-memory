@@ -21,7 +21,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _row_to_belief(row: sqlite3.Row) -> Belief:
+def _row_to_belief(row: sqlite3.Row, *, is_current: bool) -> Belief:
     return Belief(
         id=row["id"],
         entity=row["entity"],
@@ -35,6 +35,7 @@ def _row_to_belief(row: sqlite3.Row) -> Belief:
         decision_type=row["decision_type"],
         valid_from=row["valid_from"],
         created_at=row["created_at"],
+        is_current=is_current,
     )
 
 
@@ -82,6 +83,19 @@ class Store:
     # ------------------------------- beliefs -------------------------------
 
     def add_belief(self, belief: Belief) -> Belief:
+        if self.get_source(belief.source_id) is None:
+            raise ValueError(f"no such source: {belief.source_id!r}")
+        if belief.event_id is not None:
+            event = self.conn.execute(
+                "SELECT source_id FROM events WHERE id = ?", (belief.event_id,)
+            ).fetchone()
+            if event is None:
+                raise ValueError(f"no such event: {belief.event_id}")
+            if event["source_id"] != belief.source_id:
+                raise ValueError(
+                    f"belief source {belief.source_id!r} does not match event "
+                    f"source {event['source_id']!r}"
+                )
         cur = self.conn.execute(
             "INSERT INTO beliefs (entity, attribute, value, status, scope, source_id, "
             "event_id, supersedes_id, decision_type, valid_from, created_at) "
@@ -101,7 +115,7 @@ class Store:
             ),
         )
         self.conn.commit()
-        return belief.model_copy(update={"id": cur.lastrowid})
+        return belief.model_copy(update={"id": cur.lastrowid, "is_current": True})
 
     def supersede(self, old_belief_id: int, new_belief: Belief) -> Belief:
         old = self.get_belief(old_belief_id)
@@ -111,21 +125,35 @@ class Store:
             raise ValueError(
                 f"supersede key mismatch: {old.key} != {(new_belief.entity, new_belief.attribute)}"
             )
+        if old.source_id != new_belief.source_id:
+            raise ValueError(
+                "supersession is same-source only; cross-source disagreement must coexist"
+            )
+        if not old.is_current:
+            raise ValueError(f"belief {old_belief_id} is already superseded")
         return self.add_belief(new_belief.model_copy(update={"supersedes_id": old_belief_id}))
 
     def get_belief(self, belief_id: int) -> Optional[Belief]:
-        row = self.conn.execute("SELECT * FROM beliefs WHERE id = ?", (belief_id,)).fetchone()
-        return _row_to_belief(row) if row else None
+        row = self.conn.execute(
+            "SELECT b.*, NOT EXISTS "
+            "(SELECT 1 FROM beliefs newer WHERE newer.supersedes_id = b.id) AS is_current "
+            "FROM beliefs b WHERE b.id = ?",
+            (belief_id,),
+        ).fetchone()
+        return _row_to_belief(row, is_current=bool(row["is_current"])) if row else None
 
     def is_current(self, belief_id: int) -> bool:
         row = self.conn.execute(
-            "SELECT 1 FROM beliefs WHERE supersedes_id = ? LIMIT 1", (belief_id,)
+            "SELECT EXISTS(SELECT 1 FROM beliefs WHERE id = ?) AS exists_flag, "
+            "NOT EXISTS(SELECT 1 FROM beliefs WHERE supersedes_id = ?) AS current_flag",
+            (belief_id, belief_id),
         ).fetchone()
-        return row is None
+        return bool(row["exists_flag"] and row["current_flag"])
 
     def valid_to(self, belief_id: int) -> Optional[str]:
         row = self.conn.execute(
-            "SELECT valid_from FROM beliefs WHERE supersedes_id = ?", (belief_id,)
+            "SELECT valid_from FROM beliefs WHERE supersedes_id = ? ORDER BY valid_from, id LIMIT 1",
+            (belief_id,),
         ).fetchone()
         return row["valid_from"] if row else None
 
@@ -133,10 +161,10 @@ class Store:
         rows = self.conn.execute(
             "SELECT * FROM beliefs WHERE entity = ? AND attribute = ? "
             "AND id NOT IN (SELECT supersedes_id FROM beliefs WHERE supersedes_id IS NOT NULL) "
-            "ORDER BY valid_from",
+            "ORDER BY valid_from, id",
             (entity, attribute),
         ).fetchall()
-        return [_row_to_belief(r) for r in rows]
+        return [_row_to_belief(r, is_current=True) for r in rows]
 
     def belief_chain(self, belief_id: int) -> list[Belief]:
         """Walk supersedes_id backward from belief_id to its root. Oldest first."""

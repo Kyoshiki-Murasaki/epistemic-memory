@@ -127,6 +127,41 @@ def test_supersede_key_mismatch_rejected(store):
         store.supersede(b.id, make_belief(entity="order_9999"))
 
 
+def test_cross_source_supersession_rejected_so_disagreement_must_coexist(store):
+    user_claim = store.add_belief(make_belief())
+    with pytest.raises(ValueError, match="same-source only"):
+        store.supersede(
+            user_claim.id,
+            make_belief(
+                value="FAILED",
+                source_id="billing",
+                status=EpistemicStatus.system_verified,
+            ),
+        )
+    assert store.is_current(user_claim.id)
+
+
+def test_already_superseded_belief_cannot_branch(store):
+    original = store.add_belief(make_belief(value="first"))
+    store.supersede(original.id, make_belief(value="second"))
+    with pytest.raises(ValueError, match="already superseded"):
+        store.supersede(original.id, make_belief(value="third"))
+    current = store.current_beliefs(original.entity, original.attribute)
+    assert [belief.value for belief in current] == ["second"]
+
+
+def test_belief_event_provenance_must_match_source(store):
+    event = store.add_event(
+        Event(source_id="user", content="I paid", scope="global", created_at="2026-07-01")
+    )
+    with pytest.raises(ValueError, match="does not match event source"):
+        store.add_belief(make_belief(source_id="billing", event_id=event.id))
+
+
+def test_nonexistent_belief_is_not_current(store):
+    assert store.is_current(999_999) is False
+
+
 # ---------------------------- current_beliefs -------------------------------
 
 
@@ -165,6 +200,18 @@ def test_current_beliefs_keeps_cross_source_conflicts_both_live(store):
     )
     current = store.current_beliefs("order_4411", "payment_status")
     assert {b.value for b in current} == {"paid", "FAILED"}
+
+
+def test_current_beliefs_ties_use_immutable_id_order(store):
+    first = store.add_belief(make_belief(value="first", valid_from="2026-07-01"))
+    second = store.add_belief(
+        make_belief(
+            value="second", source_id="billing", status=EpistemicStatus.system_verified,
+            valid_from="2026-07-01",
+        )
+    )
+    current = store.current_beliefs("order_4411", "payment_status")
+    assert [belief.id for belief in current] == [first.id, second.id]
 
 
 # --------------------------- API boundary (sqlite3) --------------------------
