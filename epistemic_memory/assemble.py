@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -23,6 +22,7 @@ from .models import (
     TrustPolicy,
 )
 from .policy import PolicyEvaluationError, gate, resolve_conflict
+from .rendering import safe_text as _safe
 from .retrieve import retrieve_beliefs
 from .store import Store
 
@@ -35,11 +35,6 @@ _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 def estimate_tokens(text: str) -> int:
     """Deterministic pilot estimate: one token per word or punctuation mark."""
     return len(_TOKEN_RE.findall(text))
-
-
-def _safe(value: object) -> str:
-    """Render one dynamic field without allowing text-boundary injection."""
-    return json.dumps(str(value), ensure_ascii=True)
 
 
 def _trust_interpretation(status: EpistemicStatus) -> str:

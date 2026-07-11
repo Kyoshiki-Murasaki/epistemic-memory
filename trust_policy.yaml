@@ -131,11 +131,11 @@ agents:
     max_action_tier: irreversible
     allowed_scopes: ["global", "persona", "project:*", "task_type:*"]
     commitment_operations: [create, transition, scan_overdue]
-    memory_operations: [correct, register_artifact, register_dependency]
+    memory_operations: [correct, register_artifact, register_dependency, explain, propose]
     writable_source_ids: [support-agent]
   analytics-bot:
     max_action_tier: informational
     allowed_scopes: ["global"]
     commitment_operations: []
-    memory_operations: []
+    memory_operations: [explain]
     writable_source_ids: []

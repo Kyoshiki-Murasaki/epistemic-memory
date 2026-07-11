@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+from typing import Callable, Optional
 
+from .audit import AuditPersistenceError
 from .ingest import ingest_event
 from .models import (
     Artifact,
@@ -335,6 +337,7 @@ def correct_belief(
     request: CorrectionRequest,
     *,
     as_of: datetime,
+    audit_callback: Optional[Callable[[CorrectionResult], None]] = None,
 ) -> CorrectionResult:
     agent, error = _agent_for_operation(policy, agent_id, MemoryOperation.correct)
     if error == M6ResultCode.agent_unknown:
@@ -428,7 +431,7 @@ def correct_belief(
         return [candidate]
 
     try:
-        with store.transaction():
+        with store.transaction(immediate=True):
             ingested = ingest_event(
                 store,
                 policy,
@@ -454,29 +457,39 @@ def correct_belief(
                 visible_scopes=visible_scopes,
                 as_of=as_of,
             )
+            hidden = []
+            if hidden_count:
+                hidden.append(HiddenImpactSummary(
+                    reason_code=M6ResultCode.hidden_downstream_impacts,
+                    rule_id="M6-HIDDEN-IMPACTS-001",
+                    count=hidden_count,
+                    safe_detail=(
+                        "downstream artifacts were protected outside response visibility"
+                    ),
+                ))
+            result = CorrectionResult(
+                ok=True,
+                code=M6ResultCode.correction_applied,
+                message="correction applied and downstream artifacts propagated",
+                as_of=as_of,
+                event=ingested.event,
+                belief=replacement,
+                visible_impacts=visible,
+                hidden_impacts=hidden,
+                affected_count=affected_count,
+            )
+            if audit_callback is not None:
+                audit_callback(result)
+    except AuditPersistenceError:
+        return _correction_failure(
+            M6ResultCode.audit_persistence_failed,
+            "correction and propagation rolled back because audit persistence failed",
+            as_of,
+        )
     except Exception:
         return _correction_failure(
             M6ResultCode.atomic_propagation_failure,
             "correction and propagation rolled back atomically",
             as_of,
         )
-
-    hidden = []
-    if hidden_count:
-        hidden.append(HiddenImpactSummary(
-            reason_code=M6ResultCode.hidden_downstream_impacts,
-            rule_id="M6-HIDDEN-IMPACTS-001",
-            count=hidden_count,
-            safe_detail="downstream artifacts were protected outside response visibility",
-        ))
-    return CorrectionResult(
-        ok=True,
-        code=M6ResultCode.correction_applied,
-        message="correction applied and downstream artifacts propagated",
-        as_of=as_of,
-        event=ingested.event,
-        belief=replacement,
-        visible_impacts=visible,
-        hidden_impacts=hidden,
-        affected_count=affected_count,
-    )
+    return result

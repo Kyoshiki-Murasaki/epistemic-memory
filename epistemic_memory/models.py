@@ -39,6 +39,100 @@ class GateDecision(str, Enum):
     needs_human = "needs_human"
 
 
+class SessionMode(str, Enum):
+    direct = "direct"
+    propose = "propose"
+    ephemeral = "ephemeral"
+
+
+class AuditOperation(str, Enum):
+    ingest = "ingest"
+    proposal_create = "proposal_create"
+    proposal_approve = "proposal_approve"
+    proposal_reject = "proposal_reject"
+    assemble = "assemble"
+    gate = "gate"
+    commitment_create = "commitment_create"
+    commitment_transition = "commitment_transition"
+    overdue_scan = "overdue_scan"
+    artifact_register = "artifact_register"
+    dependency_register = "dependency_register"
+    correction = "correction"
+
+
+class AuditOutcome(str, Enum):
+    completed = "completed"
+    denied = "denied"
+    stale = "stale"
+
+
+class AuditResultCode(str, Enum):
+    context_assembled = "context_assembled"
+    gate_evaluated = "gate_evaluated"
+    audit_persistence_failed = "audit_persistence_failed"
+
+
+class IngestResultCode(str, Enum):
+    beliefs_committed = "beliefs_committed"
+    audit_persistence_failed = "audit_persistence_failed"
+    ephemeral_write_blocked = "ephemeral_write_blocked"
+
+
+class ProposalState(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    stale = "stale"
+
+
+class ProposalResultCode(str, Enum):
+    proposals_created = "proposals_created"
+    proposals_listed = "proposals_listed"
+    proposal_approved = "proposal_approved"
+    proposal_rejected = "proposal_rejected"
+    proposal_stale = "proposal_stale"
+    proposal_already_decided = "proposal_already_decided"
+    agent_unknown = "agent_unknown"
+    operation_not_permitted = "operation_not_permitted"
+    approval_actor_required = "approval_actor_required"
+    approval_actor_not_distinct = "approval_actor_not_distinct"
+    scope_context_missing = "scope_context_missing"
+    scope_denied = "scope_denied"
+    proposal_unavailable = "proposal_unavailable"
+    candidate_scope_denied = "candidate_scope_denied"
+    candidate_structure_invalid = "candidate_structure_invalid"
+    source_invalid = "source_invalid"
+    policy_changed = "policy_changed"
+    structurally_stale = "structurally_stale"
+    audit_persistence_failed = "audit_persistence_failed"
+    atomic_operation_failed = "atomic_operation_failed"
+    ephemeral_write_blocked = "ephemeral_write_blocked"
+
+
+class ExplainResultCode(str, Enum):
+    explained = "explained"
+    trace_unavailable = "trace_unavailable"
+    scope_context_missing = "scope_context_missing"
+
+
+class CounterfactualCode(str, Enum):
+    changed = "changed"
+    no_change = "no_change"
+    belief_not_in_trace = "belief_not_in_trace"
+    counterfactual_not_applicable = "counterfactual_not_applicable"
+
+
+class StructuralFollowUpCode(str, Enum):
+    still_structurally_current = "still_structurally_current"
+    superseded_by_later_same_source_belief = "superseded_by_later_same_source_belief"
+    current_retraction = "current_retraction"
+    superseded_by_retraction = "superseded_by_retraction"
+    current_do_not_use = "current_do_not_use"
+    current_disputed = "current_disputed"
+    current_superseded_status = "current_superseded_status"
+    follow_up_unavailable = "follow_up_unavailable"
+
+
 class CommitmentState(str, Enum):
     open = "open"
     waiting = "waiting"
@@ -57,6 +151,8 @@ class MemoryOperation(str, Enum):
     correct = "correct"
     register_artifact = "register_artifact"
     register_dependency = "register_dependency"
+    explain = "explain"
+    propose = "propose"
 
 
 class ArtifactKind(str, Enum):
@@ -119,6 +215,8 @@ class M6ResultCode(str, Enum):
     executed_action_requires_review = "executed_action_requires_review"
     hidden_downstream_impacts = "hidden_downstream_impacts"
     atomic_propagation_failure = "atomic_propagation_failure"
+    audit_persistence_failed = "audit_persistence_failed"
+    ephemeral_write_blocked = "ephemeral_write_blocked"
 
 
 class CommitmentResultCode(str, Enum):
@@ -140,6 +238,8 @@ class CommitmentResultCode(str, Enum):
     proof_reference_invalid = "proof_reference_invalid"
     proof_not_applicable = "proof_not_applicable"
     deadline_invalid = "deadline_invalid"
+    audit_persistence_failed = "audit_persistence_failed"
+    ephemeral_write_blocked = "ephemeral_write_blocked"
 
 
 _SCOPE_RE = re.compile(
@@ -241,6 +341,8 @@ class Belief(BaseModel):
 
 class CandidateBelief(BaseModel):
     """What the LLM proposes from an event. Never committed as-is (spec principle 2)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     entity: str
     attribute: str
@@ -422,6 +524,7 @@ class CommitmentMutationResult(BaseModel):
     code: CommitmentResultCode
     message: str
     commitment: Optional[Commitment] = None
+    trace_id: Optional[str] = None
 
 
 class CommitmentListResult(BaseModel):
@@ -434,10 +537,11 @@ class CommitmentListResult(BaseModel):
 class OverdueScanResult(BaseModel):
     authorized: bool
     code: CommitmentResultCode
-    as_of: datetime
+    as_of: Optional[datetime] = None
     overdue: list[Commitment]
     promoted_count: int = Field(ge=0)
     exclusions: list[CommitmentExclusionSummary]
+    trace_id: Optional[str] = None
 
 
 class ArtifactRegistrationRequest(BaseModel):
@@ -592,6 +696,7 @@ class ArtifactRegistrationResult(BaseModel):
     code: M6ResultCode
     message: str
     artifact: Optional[Artifact] = None
+    trace_id: Optional[str] = None
 
 
 class DependencyRegistrationResult(BaseModel):
@@ -599,6 +704,7 @@ class DependencyRegistrationResult(BaseModel):
     code: M6ResultCode
     message: str
     dependency: Optional[Dependency] = None
+    trace_id: Optional[str] = None
 
 
 class ArtifactImpact(BaseModel):
@@ -621,22 +727,199 @@ class CorrectionResult(BaseModel):
     ok: bool
     code: M6ResultCode
     message: str
-    as_of: datetime
+    as_of: Optional[datetime] = None
     event: Optional[Event] = None
     belief: Optional[Belief] = None
     visible_impacts: list[ArtifactImpact] = Field(default_factory=list)
     hidden_impacts: list[HiddenImpactSummary] = Field(default_factory=list)
     affected_count: int = Field(default=0, ge=0)
+    trace_id: Optional[str] = None
 
     @field_validator("as_of")
     @classmethod
-    def validate_timestamp(cls, value: datetime) -> datetime:
-        return _aware_utc(value, "as_of")
+    def validate_timestamp(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _aware_utc(value, "as_of") if value is not None else None
+
+
+class Proposal(BaseModel):
+    sequence: Optional[int] = Field(default=None, gt=0)
+    id: str
+    source_event_id: int = Field(gt=0)
+    source_id: str
+    source_type: str
+    entity: str
+    attribute: str
+    value: str
+    proposed_status: EpistemicStatus
+    effective_status: EpistemicStatus
+    scope: str
+    decision_type: Optional[str] = None
+    creator_agent_id: str
+    created_at: datetime
+    policy_version: int
+    policy_fingerprint: str
+    creation_trace_id: str
+    expected_current_belief_id: Optional[int] = Field(default=None, gt=0)
+    expected_current_absent: bool
+    state: ProposalState = ProposalState.pending
+    decision_actor_id: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    decision_trace_id: Optional[str] = None
+    approved_belief_id: Optional[int] = Field(default=None, gt=0)
+    terminal_reason_code: Optional[str] = None
+
+    @field_validator(
+        "id",
+        "source_id",
+        "source_type",
+        "entity",
+        "attribute",
+        "value",
+        "creator_agent_id",
+        "policy_fingerprint",
+        "creation_trace_id",
+    )
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        return _nonempty(value, info.field_name)
+
+    @field_validator("scope")
+    @classmethod
+    def validate_proposal_scope(cls, value: str) -> str:
+        return _scope(value)
+
+    @field_validator("created_at", "decided_at")
+    @classmethod
+    def validate_proposal_timestamp(
+        cls, value: Optional[datetime], info
+    ) -> Optional[datetime]:
+        return _aware_utc(value, info.field_name) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_expected_current(self):
+        if self.expected_current_absent == (self.expected_current_belief_id is not None):
+            raise ValueError(
+                "proposal must record exactly one of expected-current absence or ID"
+            )
+        if self.state == ProposalState.pending:
+            if any(
+                value is not None
+                for value in (
+                    self.decision_actor_id,
+                    self.decided_at,
+                    self.decision_trace_id,
+                    self.approved_belief_id,
+                    self.terminal_reason_code,
+                )
+            ):
+                raise ValueError("pending proposal cannot contain terminal decision data")
+        else:
+            if not all(
+                value is not None
+                for value in (
+                    self.decision_actor_id,
+                    self.decided_at,
+                    self.decision_trace_id,
+                    self.terminal_reason_code,
+                )
+            ):
+                raise ValueError("terminal proposal requires immutable decision provenance")
+            if self.state == ProposalState.approved and self.approved_belief_id is None:
+                raise ValueError("approved proposal requires approved belief ID")
+            if self.state != ProposalState.approved and self.approved_belief_id is not None:
+                raise ValueError("non-approved proposal cannot reference an approved belief")
+        return self
+
+
+class ProposalCreateResult(BaseModel):
+    ok: bool
+    code: ProposalResultCode
+    message: str
+    event: Optional[Event] = None
+    proposals: list[Proposal] = Field(default_factory=list)
+    trace_id: Optional[str] = None
+
+
+class ProposalListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Optional[str]
+    task_type: Optional[str] = None
+    state: Optional[ProposalState] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class ProposalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str
+    scope: Optional[str]
+    task_type: Optional[str] = None
+
+    @field_validator("proposal_id")
+    @classmethod
+    def validate_proposal_id(cls, value: str) -> str:
+        return _nonempty(value, "proposal_id")
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class ProposalExclusionSummary(BaseModel):
+    reason_code: str
+    rule_id: str
+    count: int = Field(ge=0)
+    safe_detail: str
+
+
+class ProposalListResult(BaseModel):
+    authorized: bool
+    code: ProposalResultCode
+    proposals: list[Proposal] = Field(default_factory=list)
+    exclusions: list[ProposalExclusionSummary] = Field(default_factory=list)
+
+
+class ProposalDecisionResult(BaseModel):
+    ok: bool
+    code: ProposalResultCode
+    message: str
+    proposal: Optional[Proposal] = None
+    belief: Optional[Belief] = None
+    trace_id: Optional[str] = None
 
 
 class IngestResult(BaseModel):
-    event: Event
-    beliefs: list[Belief]
+    ok: bool = True
+    code: IngestResultCode = IngestResultCode.beliefs_committed
+    event: Optional[Event] = None
+    beliefs: list[Belief] = Field(default_factory=list)
+    trace_id: Optional[str] = None
 
 
 # --------------------------- policy models --------------------------------
@@ -845,6 +1128,8 @@ class PolicyReason(BaseModel):
 
 
 class GateResult(BaseModel):
+    ok: bool = True
+    result_code: AuditResultCode = AuditResultCode.gate_evaluated
     decision: GateDecision
     action: str
     decision_type: Optional[str]
@@ -853,6 +1138,8 @@ class GateResult(BaseModel):
     reason_codes: list[str]
     reasons: list[str]
     details: list[PolicyReason]
+    trace_id: Optional[str] = None
+    trace_persisted: Optional[bool] = None
 
 
 class RetrievalRequest(BaseModel):
@@ -988,11 +1275,410 @@ class MemoryReceipt(BaseModel):
 
 class AssembledContext(BaseModel):
     request: AssemblyRequest
-    text: str
-    rendered_receipt: str
-    items: list[RetrievedBelief]
+    ok: bool = True
+    result_code: AuditResultCode = AuditResultCode.context_assembled
+    text: str = ""
+    rendered_receipt: str = ""
+    items: list[RetrievedBelief] = Field(default_factory=list)
+    conflicts: list[ConflictGroup] = Field(default_factory=list)
+    permissions: list[PermissionEntry] = Field(default_factory=list)
+    receipt: Optional[MemoryReceipt] = None
+    tokens_injected: int = 0
+    token_budget: int
+    trace_id: Optional[str] = None
+    trace_persisted: Optional[bool] = None
+
+
+# -------------------------- M7 audit / explain -----------------------------
+
+
+class PolicySnapshot(BaseModel):
+    version: int
+    fingerprint: str
+
+    @field_validator("fingerprint")
+    @classmethod
+    def validate_fingerprint(cls, value: str) -> str:
+        value = _nonempty(value, "fingerprint")
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("policy fingerprint must be a lowercase SHA-256 digest")
+        return value
+
+
+class BeliefEvidenceSnapshot(BaseModel):
+    belief_id: int = Field(gt=0)
+    entity: str
+    attribute: str
+    value: str
+    status: EpistemicStatus
+    scope: str
+    source_id: str
+    source_type: str
+    source_label: str
+    event_id: Optional[int] = Field(default=None, gt=0)
+    supersedes_id: Optional[int] = Field(default=None, gt=0)
+    decision_type: Optional[str] = None
+    valid_from: str
+    created_at: str
+    was_structurally_current: bool
+
+    @field_validator(
+        "entity",
+        "attribute",
+        "value",
+        "source_id",
+        "source_type",
+        "source_label",
+        "valid_from",
+        "created_at",
+    )
+    @classmethod
+    def validate_snapshot_text(cls, value: str, info) -> str:
+        return _nonempty(value, info.field_name)
+
+    @field_validator("scope")
+    @classmethod
+    def validate_snapshot_scope(cls, value: str) -> str:
+        return _scope(value)
+
+
+class EvidenceUseSnapshot(BaseModel):
+    evidence: BeliefEvidenceSnapshot
+    rank: int = Field(gt=0)
+    rank_factors: RankFactors
+    admitted_by: list[str]
+    conflict_group_id: Optional[str] = None
+
+
+class ConflictStateSnapshot(BaseModel):
+    group_id: str
+    belief_ids: list[int]
+    winner_id: Optional[int] = None
+    rule_id: Optional[str] = None
+    conflicted: bool
+
+
+class PermissionChange(BaseModel):
+    entity: str
+    attribute: str
+    action: str
+    before: Optional[GateDecision] = None
+    after: Optional[GateDecision] = None
+    before_rule_ids: list[str] = Field(default_factory=list)
+    after_rule_ids: list[str] = Field(default_factory=list)
+    before_reason_codes: list[str] = Field(default_factory=list)
+    after_reason_codes: list[str] = Field(default_factory=list)
+
+
+class ConflictChange(BaseModel):
+    group_id: str
+    before: Optional[ConflictStateSnapshot] = None
+    after: Optional[ConflictStateSnapshot] = None
+
+
+class CounterfactualResult(BaseModel):
+    belief_id: Optional[int] = Field(default=None, gt=0)
+    code: CounterfactualCode
+    remaining_belief_ids: list[int] = Field(default_factory=list)
+    gate_before: Optional[GateDecision] = None
+    gate_after: Optional[GateDecision] = None
+    reason_codes_before: list[str] = Field(default_factory=list)
+    reason_codes_after: list[str] = Field(default_factory=list)
+    permission_changes: list[PermissionChange] = Field(default_factory=list)
+    conflict_changes: list[ConflictChange] = Field(default_factory=list)
+
+
+class AssemblyAuditSnapshot(BaseModel):
+    request: AssemblyRequest
+    evidence: list[EvidenceUseSnapshot]
     conflicts: list[ConflictGroup]
     permissions: list[PermissionEntry]
     receipt: MemoryReceipt
-    tokens_injected: int
-    token_budget: int
+    rendered_receipt: str
+    tokens_injected: int = Field(ge=0)
+    token_budget: int = Field(gt=0)
+
+
+class GateAuditSnapshot(BaseModel):
+    action: str
+    entity: str
+    request_scope: str
+    task_type: Optional[str] = None
+    evidence: list[BeliefEvidenceSnapshot]
+    result: GateResult
+    exclusions: list[ExclusionSummary] = Field(default_factory=list)
+    conflict: Optional[ConflictStateSnapshot] = None
+
+    @field_validator("request_scope")
+    @classmethod
+    def validate_request_scope(cls, value: str) -> str:
+        return _scope(value)
+
+
+class ProposalAuditSnapshot(BaseModel):
+    proposal_id: str
+    source_event_id: int = Field(gt=0)
+    source_id: str
+    source_type: str
+    entity: str
+    attribute: str
+    value: str
+    proposed_status: EpistemicStatus
+    effective_status: EpistemicStatus
+    scope: str
+    decision_type: Optional[str] = None
+    creator_agent_id: str
+    policy_version: int
+    policy_fingerprint: str
+    expected_current_belief_id: Optional[int] = Field(default=None, gt=0)
+    expected_current_absent: bool
+    state: ProposalState
+
+    @field_validator(
+        "proposal_id", "source_id", "source_type", "entity", "attribute",
+        "value", "creator_agent_id", "policy_fingerprint",
+    )
+    @classmethod
+    def validate_proposal_audit_text(cls, value: str, info) -> str:
+        return _nonempty(value, info.field_name)
+
+    @field_validator("scope")
+    @classmethod
+    def validate_proposal_audit_scope(cls, value: str) -> str:
+        return _scope(value)
+
+
+class ArtifactImpactAuditSnapshot(BaseModel):
+    artifact_id: int = Field(gt=0)
+    depth: int = Field(ge=1)
+    previous_state: ArtifactPropagationState
+    new_state: ArtifactPropagationState
+    reason_code: M6ResultCode
+    rule_id: str
+    state_changed: bool
+
+
+class MutationAuditSnapshot(BaseModel):
+    event_ids: list[int] = Field(default_factory=list)
+    belief_ids: list[int] = Field(default_factory=list)
+    beliefs: list[BeliefEvidenceSnapshot] = Field(default_factory=list)
+    proposal_ids: list[str] = Field(default_factory=list)
+    proposals: list[ProposalAuditSnapshot] = Field(default_factory=list)
+    target_belief: Optional[BeliefEvidenceSnapshot] = None
+    commitment_ids: list[int] = Field(default_factory=list)
+    artifact_ids: list[int] = Field(default_factory=list)
+    dependency_ids: list[int] = Field(default_factory=list)
+    previous_state: Optional[str] = None
+    new_state: Optional[str] = None
+    promoted_commitment_ids: list[int] = Field(default_factory=list)
+    observed_current_belief_ids: list[int] = Field(default_factory=list)
+    visible_impact_artifact_ids: list[int] = Field(default_factory=list)
+    visible_impacts: list[ArtifactImpactAuditSnapshot] = Field(default_factory=list)
+    hidden_impact_count: int = Field(default=0, ge=0)
+    affected_count: int = Field(default=0, ge=0)
+
+
+class AuditPayload(BaseModel):
+    assembly: Optional[AssemblyAuditSnapshot] = None
+    gate: Optional[GateAuditSnapshot] = None
+    mutation: Optional[MutationAuditSnapshot] = None
+    counterfactuals: list[CounterfactualResult] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_one_snapshot(self):
+        populated = sum(
+            value is not None for value in (self.assembly, self.gate, self.mutation)
+        )
+        if populated != 1:
+            raise ValueError("audit payload requires exactly one typed operation snapshot")
+        return self
+
+
+class AuditTrace(BaseModel):
+    sequence: Optional[int] = Field(default=None, gt=0)
+    trace_id: str
+    session_id: str
+    session_mode: SessionMode
+    agent_id: str
+    approval_actor_id: Optional[str] = None
+    active_scope: str
+    task_type: Optional[str] = None
+    operation: AuditOperation
+    outcome: AuditOutcome
+    result_code: str
+    reason_codes: list[str] = Field(default_factory=list)
+    rule_ids: list[str] = Field(default_factory=list)
+    policy: PolicySnapshot
+    payload: AuditPayload
+    persisted: bool
+    created_at: datetime
+
+    @field_validator(
+        "trace_id", "session_id", "agent_id", "result_code"
+    )
+    @classmethod
+    def validate_trace_text(cls, value: str, info) -> str:
+        return _nonempty(value, info.field_name)
+
+    @field_validator("approval_actor_id")
+    @classmethod
+    def validate_optional_actor(cls, value: Optional[str]) -> Optional[str]:
+        return _nonempty(value, "approval_actor_id") if value is not None else None
+
+    @field_validator("active_scope")
+    @classmethod
+    def validate_active_scope(cls, value: str) -> str:
+        return _scope(value)
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_trace_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_trace_timestamp(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "created_at")
+
+    @field_validator("reason_codes", "rule_ids")
+    @classmethod
+    def validate_unique_codes(cls, values: list[str], info) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError(f"{info.field_name} entries must be unique")
+        for value in values:
+            _nonempty(value, f"{info.field_name} entry")
+        return values
+
+    @model_validator(mode="after")
+    def validate_persistence_mode(self):
+        if self.persisted == (self.session_mode == SessionMode.ephemeral):
+            raise ValueError(
+                "ephemeral traces must be transient and durable traces non-ephemeral"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_operation_snapshot_consistency(self):
+        if self.operation == AuditOperation.assemble:
+            if self.payload.assembly is None:
+                raise ValueError("assembly trace requires an assembly snapshot")
+            if self.active_scope != self.payload.assembly.request.scope:
+                raise ValueError("trace scope does not match assembly request scope")
+            if self.task_type != self.payload.assembly.request.task_type:
+                raise ValueError("trace task type does not match assembly request")
+            assembly = self.payload.assembly
+            evidence = {
+                item.evidence.belief_id: item.evidence for item in assembly.evidence
+            }
+            receipt = {item.belief_id: item for item in assembly.receipt.included}
+            if set(evidence) != set(receipt):
+                raise ValueError("assembly receipt does not match historical evidence")
+            for belief_id, item in receipt.items():
+                snapshot = evidence[belief_id]
+                if (
+                    item.status != snapshot.status
+                    or item.source_id != snapshot.source_id
+                    or item.source_type != snapshot.source_type
+                    or item.scope != snapshot.scope
+                ):
+                    raise ValueError("assembly receipt evidence metadata is inconsistent")
+            evidence_ids = set(evidence)
+            if any(
+                not set(conflict.belief_ids).issubset(evidence_ids)
+                for conflict in assembly.conflicts
+            ):
+                raise ValueError("assembly conflict references evidence not in the trace")
+            evidence_keys = {
+                (item.entity, item.attribute) for item in evidence.values()
+            }
+            if any(
+                (permission.entity, permission.attribute) not in evidence_keys
+                for permission in assembly.permissions
+            ):
+                raise ValueError("assembly permission references evidence not in the trace")
+            if (
+                assembly.receipt.tokens.used != assembly.tokens_injected
+                or assembly.receipt.tokens.budget != assembly.token_budget
+                or assembly.request.token_budget != assembly.token_budget
+            ):
+                raise ValueError("assembly token snapshot is inconsistent")
+        elif self.operation == AuditOperation.gate:
+            if self.payload.gate is None:
+                raise ValueError("gate trace requires a gate snapshot")
+            if self.active_scope != self.payload.gate.request_scope:
+                raise ValueError("trace scope does not match gate request scope")
+            if self.task_type != self.payload.gate.task_type:
+                raise ValueError("trace task type does not match gate request")
+        else:
+            if self.payload.mutation is None:
+                raise ValueError("mutation trace requires a mutation snapshot")
+            if self.payload.counterfactuals:
+                raise ValueError("mutation traces cannot contain belief counterfactuals")
+            mutation = self.payload.mutation
+            if self.operation == AuditOperation.ingest and set(mutation.belief_ids) != {
+                item.belief_id for item in mutation.beliefs
+            }:
+                raise ValueError("ingest trace belief references are inconsistent")
+            if self.operation in {
+                AuditOperation.proposal_create,
+                AuditOperation.proposal_approve,
+                AuditOperation.proposal_reject,
+            } and set(mutation.proposal_ids) != {
+                item.proposal_id for item in mutation.proposals
+            }:
+                raise ValueError("proposal trace references are inconsistent")
+            if self.operation == AuditOperation.correction and mutation.target_belief is None:
+                raise ValueError("correction trace requires its historical target snapshot")
+        return self
+
+
+class ExplainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    scope: Optional[str]
+    task_type: Optional[str] = None
+    belief_id: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("trace_id")
+    @classmethod
+    def validate_trace_id(cls, value: str) -> str:
+        return _nonempty(value, "trace_id")
+
+    @field_validator("scope")
+    @classmethod
+    def validate_explain_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_explain_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class CurrentBeliefFollowUp(BaseModel):
+    belief_id: int = Field(gt=0)
+    code: StructuralFollowUpCode
+    current_belief_id: Optional[int] = Field(default=None, gt=0)
+    current_status: Optional[EpistemicStatus] = None
+    rule_id: str = "M7-STRUCTURAL-FOLLOW-UP-001"
+
+
+class ExplainResult(BaseModel):
+    authorized: bool
+    code: ExplainResultCode
+    trace_id: str
+    trace: Optional[AuditTrace] = None
+    counterfactual: Optional[CounterfactualResult] = None
+    current_follow_up: list[CurrentBeliefFollowUp] = Field(default_factory=list)
+    rendered: str = ""

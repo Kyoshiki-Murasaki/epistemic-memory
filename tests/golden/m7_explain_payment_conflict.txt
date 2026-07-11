@@ -1,0 +1,33 @@
+AUDIT EXPLANATION
+trace:"id-trace-003" operation:"assemble" result:"context_assembled"
+agent:"support-agent" session:"session-audit-001" mode:"direct"
+scope:"global" task_type:"none" at:"2026-07-11T10:00:00+00:00"
+policy:version=1 fingerprint:"44254fe65af8f00d1e495fafa85ce522a6b097e347b739ef2cbe7eb1fc30794b"
+reasons:"conflict_detected","action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed","evidence_required_value_missing","task_scope_mismatch","agent_scope_denied","non_current","unusable_status","below_status_floor","provenance_unconfigured","status_exceeds_source_ceiling","invalid_timestamp","token_budget"
+rules:"R-NOQUERY-001","R-SCOPE-EFFECTIVE-001","R-CURRENT-001","R-USABLE-001","R-PROVENANCE-001","R-RANK-001","R-SCOPE-TASK-001","R-SCOPE-AGENT-001","R-STATUS-FLOOR-001","R-STATUS-CEILING-001","R-TIMESTAMP-001","R-BUDGET-001","P-12","G-INFORMATIONAL","G-HIGH-STAKES","G-IRREVERSIBLE","R-TOKEN-001"
+
+HISTORICAL REASONING (TIME OF DECISION)
+beliefs:
+- belief:2 status:"system_verified" source:"billing"/"billing_system" scope:"global" key:"order_4411"."payment_status" value:"FAILED" current_at_decision:true
+- belief:1 status:"user_stated" source:"user"/"user" scope:"global" key:"order_4411"."payment_status" value:"paid" current_at_decision:true
+conflicts:
+- group:"conflict:order_4411:payment_status" beliefs:2,1 winner:2 rule:"P-12"
+permissions:
+- action:"acknowledge_claim" decision:"allow" rules:"G-INFORMATIONAL","P-12"
+- action:"ask_for_receipt" decision:"allow" rules:"G-INFORMATIONAL","P-12"
+- action:"confirm_payment" decision:"deny" rules:"G-HIGH-STAKES","P-12"
+- action:"issue_refund" decision:"deny" rules:"G-IRREVERSIBLE","P-12"
+memory_receipt:included=2 tokens=1150/2000 method:"regex_words_and_punctuation_v1"
+
+COUNTERFACTUAL (POLICY SENSITIVITY)
+- code:"changed" belief:2
+- remaining:1
+- permission action:"acknowledge_claim" before:"allow" after:"allow" before_rules:"G-INFORMATIONAL","P-12" after_rules:"G-INFORMATIONAL","P-12" before_reasons:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed" after_reasons:"action_policy_selected","evidence_winner_selected","gate_checks_passed"
+- permission action:"ask_for_receipt" before:"allow" after:"allow" before_rules:"G-INFORMATIONAL","P-12" after_rules:"G-INFORMATIONAL","P-12" before_reasons:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed" after_reasons:"action_policy_selected","evidence_winner_selected","gate_checks_passed"
+- permission action:"confirm_payment" before:"deny" after:"deny" before_rules:"G-HIGH-STAKES","P-12" after_rules:"G-HIGH-STAKES","P-12" before_reasons:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","evidence_required_value_missing" after_reasons:"action_policy_selected","evidence_winner_selected","evidence_below_status_floor"
+- permission action:"issue_refund" before:"deny" after:"deny" before_rules:"G-IRREVERSIBLE","P-12" after_rules:"G-IRREVERSIBLE","P-12" before_reasons:"action_policy_selected","evidence_winner_selected","evidence_conflict_detected","evidence_required_value_missing" after_reasons:"action_policy_selected","evidence_winner_selected","evidence_below_status_floor"
+- conflict group:"conflict:order_4411:payment_status" before:"beliefs=2,1;winner=2;rule=P-12" after:"none"
+
+CURRENT FOLLOW-UP (NOT PART OF ORIGINAL DECISION)
+- belief:2 state:"still_structurally_current" current_belief:2 status:"system_verified"
+- belief:1 state:"still_structurally_current" current_belief:1 status:"user_stated"

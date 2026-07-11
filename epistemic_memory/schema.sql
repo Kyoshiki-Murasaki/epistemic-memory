@@ -3,6 +3,7 @@
 -- See PLAN.md §1 for design rationale (D1: beliefs are append-only, valid_to is derived).
 
 PRAGMA foreign_keys = ON;
+PRAGMA user_version = 7;
 
 -- ============================ sources =====================================
 CREATE TABLE IF NOT EXISTS sources (
@@ -200,21 +201,154 @@ ON dependencies(upstream_artifact_id, downstream_artifact_id)
 WHERE upstream_artifact_id IS NOT NULL;
 
 -- ============================ audit_traces ================================
--- One row per assembled context / gate decision / action. `explain` reads these.
+-- Immutable M7 decision/mutation snapshots. ``sequence`` is insertion order;
+-- ``trace_id`` is the stable externally returned identifier.
 CREATE TABLE IF NOT EXISTS audit_traces (
-    id          INTEGER PRIMARY KEY,
-    agent_id    TEXT,
-    kind        TEXT NOT NULL,
-    summary     TEXT NOT NULL,
-    payload     TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    sequence            INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id            TEXT NOT NULL UNIQUE,
+    session_id          TEXT NOT NULL,
+    session_mode        TEXT NOT NULL CHECK (session_mode IN ('direct', 'propose')),
+    agent_id            TEXT NOT NULL,
+    approval_actor_id   TEXT,
+    active_scope        TEXT NOT NULL,
+    task_type           TEXT,
+    operation           TEXT NOT NULL CHECK (operation IN (
+        'ingest', 'proposal_create', 'proposal_approve', 'proposal_reject',
+        'assemble', 'gate', 'commitment_create', 'commitment_transition',
+        'overdue_scan', 'artifact_register', 'dependency_register', 'correction'
+    )),
+    outcome             TEXT NOT NULL CHECK (
+        outcome IN ('completed', 'denied', 'stale')
+    ),
+    result_code         TEXT NOT NULL,
+    reason_codes        TEXT NOT NULL,
+    rule_ids            TEXT NOT NULL,
+    policy_version      INTEGER NOT NULL,
+    policy_fingerprint  TEXT NOT NULL,
+    payload             TEXT NOT NULL,
+    persisted           INTEGER NOT NULL CHECK (persisted = 1),
+    created_at          TEXT NOT NULL
 );
 
+CREATE TRIGGER IF NOT EXISTS audit_traces_no_update
+BEFORE UPDATE ON audit_traces
+BEGIN
+    SELECT RAISE(ABORT, 'audit traces are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_traces_no_delete
+BEFORE DELETE ON audit_traces
+BEGIN
+    SELECT RAISE(ABORT, 'audit traces are immutable');
+END;
+
 -- ============================ proposals ===================================
--- --propose approval queue (M7). Approve -> runs the normal commit path.
+-- Immutable candidate definition plus a one-way, audited terminal lifecycle.
 CREATE TABLE IF NOT EXISTS proposals (
-    id          INTEGER PRIMARY KEY,
-    candidate   TEXT NOT NULL,
-    state       TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    sequence                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                          TEXT NOT NULL UNIQUE,
+    source_event_id             INTEGER NOT NULL REFERENCES events(id),
+    source_id                   TEXT NOT NULL REFERENCES sources(id),
+    source_type                 TEXT NOT NULL,
+    entity                      TEXT NOT NULL,
+    attribute                   TEXT NOT NULL,
+    value                       TEXT NOT NULL,
+    proposed_status             TEXT NOT NULL,
+    effective_status            TEXT NOT NULL,
+    scope                       TEXT NOT NULL,
+    decision_type               TEXT,
+    creator_agent_id            TEXT NOT NULL,
+    created_at                  TEXT NOT NULL,
+    policy_version              INTEGER NOT NULL,
+    policy_fingerprint          TEXT NOT NULL,
+    expected_current_belief_id  INTEGER REFERENCES beliefs(id),
+    expected_current_absent     INTEGER NOT NULL CHECK (
+        expected_current_absent IN (0, 1)
+    ),
+    creation_trace_id           TEXT NOT NULL REFERENCES audit_traces(trace_id)
+                                  DEFERRABLE INITIALLY DEFERRED,
+    state                       TEXT NOT NULL CHECK (
+        state IN ('pending', 'approved', 'rejected', 'stale')
+    ),
+    decision_actor_id           TEXT,
+    decided_at                  TEXT,
+    decision_trace_id           TEXT REFERENCES audit_traces(trace_id)
+                                  DEFERRABLE INITIALLY DEFERRED,
+    approved_belief_id          INTEGER REFERENCES beliefs(id),
+    terminal_reason_code        TEXT,
+    CHECK (
+        (expected_current_absent = 1 AND expected_current_belief_id IS NULL)
+        OR
+        (expected_current_absent = 0 AND expected_current_belief_id IS NOT NULL)
+    ),
+    CHECK (
+        (
+            state = 'pending'
+            AND decision_actor_id IS NULL
+            AND decided_at IS NULL
+            AND decision_trace_id IS NULL
+            AND approved_belief_id IS NULL
+            AND terminal_reason_code IS NULL
+        )
+        OR
+        (
+            state != 'pending'
+            AND decision_actor_id IS NOT NULL
+            AND decided_at IS NOT NULL
+            AND decision_trace_id IS NOT NULL
+            AND terminal_reason_code IS NOT NULL
+            AND (
+                (state = 'approved' AND approved_belief_id IS NOT NULL)
+                OR (state != 'approved' AND approved_belief_id IS NULL)
+            )
+        )
+    )
 );
+
+CREATE INDEX IF NOT EXISTS proposals_scope_state_order
+ON proposals(scope, state, created_at, sequence);
+
+CREATE UNIQUE INDEX IF NOT EXISTS proposals_approved_belief
+ON proposals(approved_belief_id)
+WHERE approved_belief_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS proposals_definition_no_update
+BEFORE UPDATE ON proposals
+WHEN NEW.sequence IS NOT OLD.sequence
+  OR NEW.id IS NOT OLD.id
+  OR NEW.source_event_id IS NOT OLD.source_event_id
+  OR NEW.source_id IS NOT OLD.source_id
+  OR NEW.source_type IS NOT OLD.source_type
+  OR NEW.entity IS NOT OLD.entity
+  OR NEW.attribute IS NOT OLD.attribute
+  OR NEW.value IS NOT OLD.value
+  OR NEW.proposed_status IS NOT OLD.proposed_status
+  OR NEW.effective_status IS NOT OLD.effective_status
+  OR NEW.scope IS NOT OLD.scope
+  OR NEW.decision_type IS NOT OLD.decision_type
+  OR NEW.creator_agent_id IS NOT OLD.creator_agent_id
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.policy_version IS NOT OLD.policy_version
+  OR NEW.policy_fingerprint IS NOT OLD.policy_fingerprint
+  OR NEW.expected_current_belief_id IS NOT OLD.expected_current_belief_id
+  OR NEW.expected_current_absent IS NOT OLD.expected_current_absent
+  OR NEW.creation_trace_id IS NOT OLD.creation_trace_id
+BEGIN
+    SELECT RAISE(ABORT, 'proposal definition is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS proposals_terminal_transition_only
+BEFORE UPDATE ON proposals
+WHEN NOT (
+    OLD.state = 'pending'
+    AND NEW.state IN ('approved', 'rejected', 'stale')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'proposal decisions are terminal');
+END;
+
+CREATE TRIGGER IF NOT EXISTS proposals_no_delete
+BEFORE DELETE ON proposals
+BEGIN
+    SELECT RAISE(ABORT, 'proposals are never deleted');
+END;

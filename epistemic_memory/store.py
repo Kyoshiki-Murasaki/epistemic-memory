@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import (
+    AuditTrace,
     Artifact,
     ArtifactPropagationState,
     ArtifactRegistrationRequest,
@@ -27,8 +28,18 @@ from .models import (
     Dependency,
     DependencyEndpointKind,
     Event,
+    Proposal,
+    ProposalState,
     Source,
 )
+
+
+class StoreSchemaError(RuntimeError):
+    """The existing database cannot safely satisfy the requested store mode."""
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _row_to_belief(row: sqlite3.Row, *, is_current: bool) -> Belief:
@@ -102,25 +113,380 @@ def _row_to_dependency(row: sqlite3.Row) -> Dependency:
     )
 
 
+def _row_to_event(row: sqlite3.Row) -> Event:
+    return Event(
+        id=row["id"],
+        source_id=row["source_id"],
+        content=row["content"],
+        scope=row["scope"],
+        meta=json.loads(row["meta"]) if row["meta"] is not None else None,
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_proposal(row: sqlite3.Row) -> Proposal:
+    return Proposal(
+        sequence=row["sequence"],
+        id=row["id"],
+        source_event_id=row["source_event_id"],
+        source_id=row["source_id"],
+        source_type=row["source_type"],
+        entity=row["entity"],
+        attribute=row["attribute"],
+        value=row["value"],
+        proposed_status=row["proposed_status"],
+        effective_status=row["effective_status"],
+        scope=row["scope"],
+        decision_type=row["decision_type"],
+        creator_agent_id=row["creator_agent_id"],
+        created_at=row["created_at"],
+        policy_version=row["policy_version"],
+        policy_fingerprint=row["policy_fingerprint"],
+        expected_current_belief_id=row["expected_current_belief_id"],
+        expected_current_absent=bool(row["expected_current_absent"]),
+        creation_trace_id=row["creation_trace_id"],
+        state=row["state"],
+        decision_actor_id=row["decision_actor_id"],
+        decided_at=row["decided_at"],
+        decision_trace_id=row["decision_trace_id"],
+        approved_belief_id=row["approved_belief_id"],
+        terminal_reason_code=row["terminal_reason_code"],
+    )
+
+
+def _row_to_audit_trace(row: sqlite3.Row) -> AuditTrace:
+    return AuditTrace.model_validate({
+        "sequence": row["sequence"],
+        "trace_id": row["trace_id"],
+        "session_id": row["session_id"],
+        "session_mode": row["session_mode"],
+        "agent_id": row["agent_id"],
+        "approval_actor_id": row["approval_actor_id"],
+        "active_scope": row["active_scope"],
+        "task_type": row["task_type"],
+        "operation": row["operation"],
+        "outcome": row["outcome"],
+        "result_code": row["result_code"],
+        "reason_codes": json.loads(row["reason_codes"]),
+        "rule_ids": json.loads(row["rule_ids"]),
+        "policy": {
+            "version": row["policy_version"],
+            "fingerprint": row["policy_fingerprint"],
+        },
+        "payload": json.loads(row["payload"]),
+        "persisted": bool(row["persisted"]),
+        "created_at": row["created_at"],
+    })
+
+
 class Store:
-    def __init__(self, db_path: str):
-        self.conn = sqlite3.connect(db_path)
+    def __init__(self, db_path: str, *, read_only: bool = False):
+        self.read_only = read_only
+        if read_only:
+            path = Path(db_path).expanduser()
+            if db_path == ":memory:" or not path.is_file():
+                raise StoreSchemaError(
+                    "ephemeral mode requires an existing file-backed database"
+                )
+            uri = f"{path.resolve().as_uri()}?mode=ro"
+            try:
+                self.conn = sqlite3.connect(uri, uri=True)
+            except sqlite3.Error as exc:
+                raise StoreSchemaError(
+                    "ephemeral database could not be opened read-only"
+                ) from exc
+        else:
+            self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         try:
-            self._prepare_m6_tables()
-            schema = (Path(__file__).parent / "schema.sql").read_text()
-            self.conn.executescript(schema)
-            # Rebuild is idempotent and backfills beliefs created by a pre-FTS
-            # schema without mutating the append-only belief rows.
-            self.conn.execute("INSERT INTO beliefs_fts(beliefs_fts) VALUES ('rebuild')")
-            self.conn.commit()
-        except BaseException:
+            if read_only:
+                self.conn.execute("PRAGMA query_only = ON")
+                self._validate_required_schema()
+            else:
+                drops = [
+                    *self._prepare_m6_tables(),
+                    *self._prepare_m7_tables(),
+                ]
+                had_fts = self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'beliefs_fts'"
+                ).fetchone() is not None
+                schema = (Path(__file__).parent / "schema.sql").read_text()
+                upgrade_script = "BEGIN IMMEDIATE;\n"
+                upgrade_script += "\n".join(
+                    f"DROP TABLE {table};" for table in drops
+                )
+                upgrade_script += "\n" + schema
+                if not had_fts:
+                    upgrade_script += (
+                        "\nINSERT INTO beliefs_fts(beliefs_fts) VALUES ('rebuild');"
+                    )
+                upgrade_script += "\nCOMMIT;"
+                try:
+                    self.conn.executescript(upgrade_script)
+                except BaseException:
+                    if self.conn.in_transaction:
+                        self.conn.rollback()
+                    raise
+                self._validate_required_schema()
+        except BaseException as exc:
             self.conn.close()
+            if read_only and isinstance(exc, sqlite3.Error):
+                raise StoreSchemaError(
+                    "ephemeral database is invalid or unreadable"
+                ) from exc
             raise
         self._transaction_depth = 0
 
-    def _prepare_m6_tables(self) -> None:
+    def _table_columns(self, table: str) -> set[str]:
+        return {
+            row["name"]
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    def _prepare_m7_tables(self) -> list[str]:
+        """Replace only the accepted empty M0 placeholder tables.
+
+        Both tables are preflighted before either is dropped, so unexpected or
+        populated legacy data is never partially modified.
+        """
+        placeholders = {
+            "audit_traces": {
+                "id", "agent_id", "kind", "summary", "payload", "created_at"
+            },
+            "proposals": {"id", "candidate", "state", "created_at"},
+        }
+        modern = {
+            "audit_traces": {
+                "sequence", "trace_id", "session_id", "session_mode", "agent_id",
+                "approval_actor_id", "active_scope", "task_type", "operation",
+                "outcome", "result_code", "reason_codes", "rule_ids",
+                "policy_version", "policy_fingerprint", "payload", "persisted",
+                "created_at",
+            },
+            "proposals": {
+                "sequence", "id", "source_event_id", "source_id", "source_type",
+                "entity", "attribute", "value", "proposed_status",
+                "effective_status", "scope", "decision_type", "creator_agent_id",
+                "created_at", "policy_version", "policy_fingerprint",
+                "expected_current_belief_id", "expected_current_absent",
+                "creation_trace_id", "state", "decision_actor_id", "decided_at",
+                "decision_trace_id", "approved_belief_id", "terminal_reason_code",
+            },
+        }
+        replace: list[str] = []
+        for table in ("audit_traces", "proposals"):
+            columns = self._table_columns(table)
+            if not columns or columns == modern[table]:
+                continue
+            if columns != placeholders[table]:
+                raise StoreSchemaError(
+                    f"unrecognized pre-M7 {table} schema cannot be upgraded safely"
+                )
+            count = self.conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            if count:
+                raise StoreSchemaError(
+                    f"pre-M7 {table} rows lack required immutable audit provenance"
+                )
+            replace.append(table)
+        return [
+            table for table in ("proposals", "audit_traces") if table in replace
+        ]
+
+    def _validate_required_schema(self) -> None:
+        if int(self.conn.execute("PRAGMA user_version").fetchone()[0]) != 7:
+            raise StoreSchemaError("database schema version is not M7")
+        if not int(self.conn.execute("PRAGMA foreign_keys").fetchone()[0]):
+            raise StoreSchemaError("SQLite foreign-key enforcement is required")
+        if self.read_only and not int(
+            self.conn.execute("PRAGMA query_only").fetchone()[0]
+        ):
+            raise StoreSchemaError("ephemeral SQLite query_only enforcement is required")
+        required_columns = {
+            "sources": {"id", "type", "label", "created_at"},
+            "events": {"id", "source_id", "content", "scope", "meta", "created_at"},
+            "beliefs": {
+                "id", "entity", "attribute", "value", "status", "scope",
+                "source_id", "event_id", "supersedes_id", "decision_type",
+                "valid_from", "created_at",
+            },
+            "commitments": {
+                "id", "description", "owner", "beneficiary", "scope",
+                "created_by_agent_id", "state", "deadline", "preconditions",
+                "proof_required", "proof_reference", "created_at", "updated_at",
+            },
+            "artifacts": {
+                "id", "kind", "execution_state", "propagation_state", "scope",
+                "label", "reference", "created_by_agent_id", "created_at", "updated_at",
+            },
+            "dependencies": {
+                "id", "upstream_belief_id", "upstream_artifact_id",
+                "downstream_artifact_id", "created_by_agent_id", "created_at",
+            },
+            "audit_traces": {
+                "sequence", "trace_id", "session_id", "session_mode", "agent_id",
+                "approval_actor_id", "active_scope", "task_type", "operation",
+                "outcome", "result_code", "reason_codes", "rule_ids",
+                "policy_version", "policy_fingerprint", "payload", "persisted",
+                "created_at",
+            },
+            "proposals": {
+                "sequence", "id", "source_event_id", "source_id", "source_type",
+                "entity", "attribute", "value", "proposed_status", "effective_status",
+                "scope", "decision_type", "creator_agent_id", "created_at",
+                "policy_version", "policy_fingerprint", "expected_current_belief_id",
+                "expected_current_absent", "creation_trace_id", "state",
+                "decision_actor_id", "decided_at", "decision_trace_id",
+                "approved_belief_id", "terminal_reason_code",
+            },
+        }
+        for table, required in required_columns.items():
+            columns = self._table_columns(table)
+            if columns != required:
+                raise StoreSchemaError(
+                    f"database lacks required M7 schema for table {table!r}"
+                )
+        objects = {
+            (row["type"], row["name"])
+            for row in self.conn.execute(
+                "SELECT type, name FROM sqlite_master WHERE type IN ('table','trigger','index')"
+            )
+        }
+        required_objects = {
+            ("table", "beliefs_fts"),
+            ("trigger", "events_no_update"),
+            ("trigger", "events_no_delete"),
+            ("trigger", "beliefs_no_update"),
+            ("trigger", "beliefs_no_delete"),
+            ("trigger", "beliefs_fts_ai"),
+            ("trigger", "commitments_definition_no_update"),
+            ("trigger", "commitments_no_delete"),
+            ("trigger", "artifacts_definition_no_update"),
+            ("trigger", "artifacts_no_delete"),
+            ("trigger", "audit_traces_no_update"),
+            ("trigger", "audit_traces_no_delete"),
+            ("trigger", "proposals_definition_no_update"),
+            ("trigger", "proposals_terminal_transition_only"),
+            ("trigger", "proposals_no_delete"),
+            ("index", "beliefs_key"),
+            ("index", "dependencies_belief_edge"),
+            ("index", "dependencies_artifact_edge"),
+            ("index", "proposals_scope_state_order"),
+            ("index", "proposals_approved_belief"),
+        }
+        missing = required_objects - objects
+        if missing:
+            raise StoreSchemaError(
+                f"database lacks required M7 schema objects: {sorted(missing)}"
+            )
+        expected_indexes = {
+            "beliefs_key": ("beliefs", False, ["entity", "attribute"]),
+            "dependencies_belief_edge": (
+                "dependencies", True, ["upstream_belief_id", "downstream_artifact_id"]
+            ),
+            "dependencies_artifact_edge": (
+                "dependencies", True, ["upstream_artifact_id", "downstream_artifact_id"]
+            ),
+            "proposals_scope_state_order": (
+                "proposals", False, ["scope", "state", "created_at", "sequence"]
+            ),
+            "proposals_approved_belief": (
+                "proposals", True, ["approved_belief_id"]
+            ),
+        }
+        for name, (table, unique, columns) in expected_indexes.items():
+            index_rows = {
+                row["name"]: bool(row["unique"])
+                for row in self.conn.execute(f"PRAGMA index_list({table})")
+            }
+            actual_columns = [
+                row["name"]
+                for row in self.conn.execute(f"PRAGMA index_info({name})")
+            ]
+            if index_rows.get(name) != unique or actual_columns != columns:
+                raise StoreSchemaError(f"database index {name!r} is not the M7 definition")
+        fts_sql_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'beliefs_fts'"
+        ).fetchone()
+        if (
+            fts_sql_row is None
+            or "VIRTUAL TABLE" not in fts_sql_row["sql"].upper()
+            or "FTS5" not in fts_sql_row["sql"].upper()
+        ):
+            raise StoreSchemaError("database lacks the required FTS5 belief index")
+
+        def normalized(sql: str) -> str:
+            return "".join(sql.lower().split()).replace("'", "").replace('"', "")
+
+        trigger_fragments = {
+            "events_no_update": ("beforeupdateonevents", "eventsareappend-only"),
+            "events_no_delete": ("beforedeleteonevents", "eventsareappend-only"),
+            "beliefs_no_update": ("beforeupdateonbeliefs", "beliefsareversioned"),
+            "beliefs_no_delete": ("beforedeleteonbeliefs", "beliefsareneverdeleted"),
+            "beliefs_fts_ai": ("afterinsertonbeliefs", "insertintobeliefs_fts"),
+            "commitments_definition_no_update": (
+                "beforeupdateoncommitments", "commitmentdefinitionisimmutable"
+            ),
+            "commitments_no_delete": (
+                "beforedeleteoncommitments", "commitmentsarecancelled"
+            ),
+            "artifacts_definition_no_update": (
+                "beforeupdateonartifacts", "artifactdefinitionisimmutable"
+            ),
+            "artifacts_no_delete": (
+                "beforedeleteonartifacts", "artifactsareneverdeleted"
+            ),
+            "audit_traces_no_update": (
+                "beforeupdateonaudit_traces", "audittracesareimmutable"
+            ),
+            "audit_traces_no_delete": (
+                "beforedeleteonaudit_traces", "audittracesareimmutable"
+            ),
+            "proposals_definition_no_update": (
+                "beforeupdateonproposals", "proposaldefinitionisimmutable"
+            ),
+            "proposals_terminal_transition_only": (
+                "beforeupdateonproposals", "proposaldecisionsareterminal"
+            ),
+            "proposals_no_delete": (
+                "beforedeleteonproposals", "proposalsareneverdeleted"
+            ),
+        }
+        rows = self.conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).fetchall()
+        trigger_sql = {row["name"]: normalized(row["sql"] or "") for row in rows}
+        for name, fragments in trigger_fragments.items():
+            sql = trigger_sql.get(name, "")
+            if not all(fragment in sql for fragment in fragments):
+                raise StoreSchemaError(f"database trigger {name!r} is not the M7 definition")
+
+        table_sql = {
+            row["name"]: normalized(row["sql"] or "")
+            for row in self.conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('audit_traces', 'proposals')"
+            )
+        }
+        audit_sql = table_sql.get("audit_traces", "")
+        if (
+            "session_modein(direct,propose)" not in audit_sql
+            or "check(persisted=1)" not in audit_sql
+        ):
+            raise StoreSchemaError("audit trace table lacks required M7 constraints")
+        proposal_sql = table_sql.get("proposals", "")
+        for fragment in (
+            "referencesaudit_traces(trace_id)deferrableinitiallydeferred",
+            "expected_current_absentin(0,1)",
+            "statein(pending,approved,rejected,stale)",
+        ):
+            if fragment not in proposal_sql:
+                raise StoreSchemaError("proposal table lacks required M7 constraints")
+
+    def _prepare_m6_tables(self) -> list[str]:
         """Upgrade the unused M0-M5 artifact placeholders without guessing.
 
         The accepted M5 schema created these tables before any public API could
@@ -128,31 +494,44 @@ class Store:
         out-of-band rows exist, fail closed rather than inventing their missing
         scope, execution history, or provenance.
         """
-        columns = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(artifacts)").fetchall()
+        artifact_columns = self._table_columns("artifacts")
+        dependency_columns = self._table_columns("dependencies")
+        modern_artifacts = {
+            "id", "kind", "execution_state", "propagation_state", "scope",
+            "label", "reference", "created_by_agent_id", "created_at", "updated_at",
         }
-        if not columns or "execution_state" in columns:
-            return
+        modern_dependencies = {
+            "id", "upstream_belief_id", "upstream_artifact_id",
+            "downstream_artifact_id", "created_by_agent_id", "created_at",
+        }
+        legacy_artifacts = {"id", "kind", "ref", "state", "created_at"}
+        legacy_dependencies = {"id", "artifact_id", "belief_id"}
+        if not artifact_columns and not dependency_columns:
+            return []
+        if (
+            artifact_columns == modern_artifacts
+            and dependency_columns == modern_dependencies
+        ):
+            return []
+        if artifact_columns != legacy_artifacts or dependency_columns not in (
+            set(), legacy_dependencies
+        ):
+            raise StoreSchemaError(
+                "unrecognized pre-M6 artifact schema cannot be upgraded safely"
+            )
         artifact_count = self.conn.execute(
             "SELECT COUNT(*) FROM artifacts"
         ).fetchone()[0]
-        dependency_table = self.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dependencies'"
-        ).fetchone()
         dependency_count = (
             self.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0]
-            if dependency_table is not None
+            if dependency_columns
             else 0
         )
         if artifact_count or dependency_count:
             raise RuntimeError(
                 "pre-M6 artifact rows lack required scope and execution provenance"
             )
-        if dependency_table is not None:
-            self.conn.execute("DROP TABLE dependencies")
-        self.conn.execute("DROP TABLE artifacts")
-        self.conn.commit()
+        return [*(['dependencies'] if dependency_columns else []), "artifacts"]
 
     def close(self) -> None:
         self.conn.close()
@@ -162,19 +541,18 @@ class Store:
             self.conn.commit()
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, immediate: bool = False):
         """One local SQLite transaction for an atomic public operation."""
         if self._transaction_depth != 0:
             raise RuntimeError("nested store transactions are not supported")
-        self.conn.execute("BEGIN")
+        self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         self._transaction_depth = 1
         try:
             yield
+            self.conn.commit()
         except BaseException:
             self.conn.rollback()
             raise
-        else:
-            self.conn.commit()
         finally:
             self._transaction_depth = 0
 
@@ -197,7 +575,7 @@ class Store:
     # -------------------------------- events -------------------------------
 
     def add_event(self, event: Event) -> Event:
-        meta_json = json.dumps(event.meta) if event.meta is not None else None
+        meta_json = _canonical_json(event.meta) if event.meta is not None else None
         cur = self.conn.execute(
             "INSERT INTO events (source_id, content, scope, meta, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -205,6 +583,12 @@ class Store:
         )
         self._commit()
         return event.model_copy(update={"id": cur.lastrowid})
+
+    def get_event(self, event_id: int) -> Optional[Event]:
+        row = self.conn.execute(
+            "SELECT * FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
 
     # ------------------------------- beliefs -------------------------------
 
@@ -424,6 +808,205 @@ class Store:
             current = self.get_belief(current.supersedes_id) if current.supersedes_id else None
         chain.reverse()
         return chain
+
+    def belief_successors(self, belief_id: int) -> list[Belief]:
+        rows = self.conn.execute(
+            "SELECT b.*, NOT EXISTS "
+            "(SELECT 1 FROM beliefs newer WHERE newer.supersedes_id = b.id) "
+            "AS is_current FROM beliefs b WHERE b.supersedes_id = ? ORDER BY b.id",
+            (belief_id,),
+        ).fetchall()
+        return [
+            _row_to_belief(row, is_current=bool(row["is_current"])) for row in rows
+        ]
+
+    # ------------------------------ audit --------------------------------
+
+    def add_audit_trace(self, trace: AuditTrace) -> AuditTrace:
+        if not trace.persisted:
+            raise ValueError("only persisted audit traces may be inserted")
+        if trace.session_mode.value == "ephemeral":
+            raise ValueError("ephemeral audit traces cannot be persisted")
+        cur = self.conn.execute(
+            "INSERT INTO audit_traces (trace_id, session_id, session_mode, agent_id, "
+            "approval_actor_id, active_scope, task_type, operation, outcome, "
+            "result_code, reason_codes, rule_ids, policy_version, policy_fingerprint, "
+            "payload, persisted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?)",
+            (
+                trace.trace_id,
+                trace.session_id,
+                trace.session_mode.value,
+                trace.agent_id,
+                trace.approval_actor_id,
+                trace.active_scope,
+                trace.task_type,
+                trace.operation.value,
+                trace.outcome.value,
+                trace.result_code,
+                _canonical_json(trace.reason_codes),
+                _canonical_json(trace.rule_ids),
+                trace.policy.version,
+                trace.policy.fingerprint,
+                _canonical_json(trace.payload.model_dump(mode="json")),
+                1,
+                trace.created_at.isoformat(),
+            ),
+        )
+        self._commit()
+        return trace.model_copy(update={"sequence": int(cur.lastrowid)})
+
+    def get_audit_trace(self, trace_id: str) -> Optional[AuditTrace]:
+        row = self.conn.execute(
+            "SELECT * FROM audit_traces WHERE trace_id = ?", (trace_id,)
+        ).fetchone()
+        return _row_to_audit_trace(row) if row is not None else None
+
+    def list_audit_traces(self) -> list[AuditTrace]:
+        rows = self.conn.execute(
+            "SELECT * FROM audit_traces ORDER BY sequence"
+        ).fetchall()
+        return [_row_to_audit_trace(row) for row in rows]
+
+    # ---------------------------- proposals ------------------------------
+
+    def add_proposal(self, proposal: Proposal) -> Proposal:
+        cur = self.conn.execute(
+            "INSERT INTO proposals (id, source_event_id, source_id, source_type, "
+            "entity, attribute, value, proposed_status, effective_status, scope, "
+            "decision_type, creator_agent_id, created_at, policy_version, "
+            "policy_fingerprint, expected_current_belief_id, expected_current_absent, "
+            "creation_trace_id, state, decision_actor_id, decided_at, decision_trace_id, "
+            "approved_belief_id, terminal_reason_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal.id,
+                proposal.source_event_id,
+                proposal.source_id,
+                proposal.source_type,
+                proposal.entity,
+                proposal.attribute,
+                proposal.value,
+                proposal.proposed_status.value,
+                proposal.effective_status.value,
+                proposal.scope,
+                proposal.decision_type,
+                proposal.creator_agent_id,
+                proposal.created_at.isoformat(),
+                proposal.policy_version,
+                proposal.policy_fingerprint,
+                proposal.expected_current_belief_id,
+                int(proposal.expected_current_absent),
+                proposal.creation_trace_id,
+                proposal.state.value,
+                proposal.decision_actor_id,
+                proposal.decided_at.isoformat() if proposal.decided_at else None,
+                proposal.decision_trace_id,
+                proposal.approved_belief_id,
+                proposal.terminal_reason_code,
+            ),
+        )
+        self._commit()
+        return proposal.model_copy(update={"sequence": int(cur.lastrowid)})
+
+    def get_proposal(
+        self, proposal_id: str, *, scopes: Optional[list[str]] = None
+    ) -> Optional[Proposal]:
+        conditions = ["id = ?"]
+        params: list[object] = [proposal_id]
+        if scopes is not None:
+            if not scopes:
+                return None
+            placeholders = ", ".join("?" for _ in scopes)
+            conditions.append(f"scope IN ({placeholders})")
+            params.extend(scopes)
+        row = self.conn.execute(
+            f"SELECT * FROM proposals WHERE {' AND '.join(conditions)}", params
+        ).fetchone()
+        return _row_to_proposal(row) if row is not None else None
+
+    def list_proposals(
+        self,
+        *,
+        scopes: Optional[list[str]] = None,
+        states: Optional[list[ProposalState]] = None,
+    ) -> list[Proposal]:
+        conditions: list[str] = []
+        params: list[object] = []
+        if scopes is not None:
+            if not scopes:
+                conditions.append("0")
+            else:
+                placeholders = ", ".join("?" for _ in scopes)
+                conditions.append(f"scope IN ({placeholders})")
+                params.extend(scopes)
+        if states is not None:
+            if not states:
+                conditions.append("0")
+            else:
+                placeholders = ", ".join("?" for _ in states)
+                conditions.append(f"state IN ({placeholders})")
+                params.extend(state.value for state in states)
+        where = " AND ".join(conditions) if conditions else "1"
+        rows = self.conn.execute(
+            f"SELECT * FROM proposals WHERE {where} ORDER BY created_at, sequence",
+            params,
+        ).fetchall()
+        return [_row_to_proposal(row) for row in rows]
+
+    def count_proposals(
+        self, *, scopes: Optional[list[str]], invert_scopes: bool = False
+    ) -> int:
+        if scopes is None:
+            row = self.conn.execute("SELECT COUNT(*) FROM proposals").fetchone()
+            return int(row[0])
+        if not scopes:
+            if invert_scopes:
+                row = self.conn.execute("SELECT COUNT(*) FROM proposals").fetchone()
+                return int(row[0])
+            return 0
+        placeholders = ", ".join("?" for _ in scopes)
+        operator = "NOT IN" if invert_scopes else "IN"
+        row = self.conn.execute(
+            f"SELECT COUNT(*) FROM proposals WHERE scope {operator} ({placeholders})",
+            scopes,
+        ).fetchone()
+        return int(row[0])
+
+    def decide_proposal(
+        self,
+        proposal_id: str,
+        *,
+        state: ProposalState,
+        actor_id: str,
+        decided_at: datetime,
+        decision_trace_id: str,
+        approved_belief_id: Optional[int],
+        terminal_reason_code: str,
+    ) -> Proposal:
+        if state == ProposalState.pending:
+            raise ValueError("proposal decision must be terminal")
+        cur = self.conn.execute(
+            "UPDATE proposals SET state = ?, decision_actor_id = ?, decided_at = ?, "
+            "decision_trace_id = ?, approved_belief_id = ?, terminal_reason_code = ? "
+            "WHERE id = ? AND state = 'pending'",
+            (
+                state.value,
+                actor_id,
+                decided_at.isoformat(),
+                decision_trace_id,
+                approved_belief_id,
+                terminal_reason_code,
+                proposal_id,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("proposal state changed during decision")
+        self._commit()
+        proposal = self.get_proposal(proposal_id)
+        if proposal is None:
+            raise RuntimeError("decided proposal could not be reloaded")
+        return proposal
 
     # ----------------------- artifacts + dependencies ---------------------
 
@@ -705,7 +1288,6 @@ class Store:
             ),
         )
         if cur.rowcount != 1:
-            self.conn.rollback()
             raise RuntimeError("commitment state changed during transition")
         self._commit()
         stored = self.get_commitment(commitment_id)

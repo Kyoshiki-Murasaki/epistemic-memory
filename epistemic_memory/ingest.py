@@ -16,13 +16,66 @@ import os
 from datetime import datetime
 from typing import Callable, Optional
 
-from .models import Belief, CandidateBelief, Event, IngestResult, TrustPolicy
+from .models import Belief, CandidateBelief, Event, IngestResult, Source, TrustPolicy
 from .policy import clamp_status
 from .store import Store
 
 Extractor = Callable[[Event, str], list[CandidateBelief]]
 
 LIVE_MODEL = "claude-sonnet-5"
+_INFER_CURRENT = object()
+
+
+def materialize_candidate(
+    store: Store,
+    policy: TrustPolicy,
+    *,
+    source: Source,
+    event: Event,
+    candidate: CandidateBelief,
+    as_of: datetime,
+    valid_from: Optional[str] = None,
+    expected_current_belief_id: object = _INFER_CURRENT,
+) -> Belief:
+    """Validate, clamp, and append one candidate through the sole belief funnel.
+
+    ``expected_current_belief_id`` is inferred for ordinary direct ingest. An
+    explicit integer or ``None`` is a proposal/correction compare-and-materialize
+    assertion and therefore rejects structural drift.
+    """
+    if event.id is None:
+        raise ValueError("candidate materialization requires a persisted source event")
+    if event.source_id != source.id:
+        raise ValueError("candidate source does not match immutable source event")
+    status = clamp_status(candidate.proposed_status, source.type, policy)
+    timestamp = as_of.isoformat()
+    belief = Belief(
+        entity=candidate.entity,
+        attribute=candidate.attribute,
+        value=candidate.value,
+        status=status,
+        scope=candidate.scope,
+        source_id=source.id,
+        event_id=event.id,
+        decision_type=candidate.decision_type,
+        valid_from=valid_from or timestamp,
+        created_at=timestamp,
+    )
+    same_source = [
+        current
+        for current in store.current_beliefs(candidate.entity, candidate.attribute)
+        if current.source_id == source.id
+    ]
+    if len(same_source) > 1:
+        raise ValueError("structural key has multiple current same-source beliefs")
+    current = same_source[0] if same_source else None
+    if expected_current_belief_id is not _INFER_CURRENT:
+        actual_id = current.id if current is not None else None
+        if actual_id != expected_current_belief_id:
+            raise ValueError("same-source current belief changed before materialization")
+    if current is not None:
+        return store.supersede(current.id, belief)
+    return store.add_belief(belief)
 
 
 def ingest_event(
@@ -53,34 +106,21 @@ def ingest_event(
 
     committed: list[Belief] = []
     for candidate in candidates:
-        status = clamp_status(candidate.proposed_status, source.type, policy)
-        belief = Belief(
-            entity=candidate.entity,
-            attribute=candidate.attribute,
-            value=candidate.value,
-            status=status,
-            scope=candidate.scope,
-            source_id=source_id,
-            event_id=event.id,
-            decision_type=candidate.decision_type,
-            valid_from=timestamp,
-            created_at=timestamp,
+        expected = (
+            _INFER_CURRENT
+            if supersede_belief_id is None
+            else supersede_belief_id
         )
-        existing = store.current_beliefs(candidate.entity, candidate.attribute)
-        if supersede_belief_id is None:
-            same_source = next((b for b in existing if b.source_id == source_id), None)
-        else:
-            same_source = next(
-                (b for b in existing if b.id == supersede_belief_id), None
-            )
-            if same_source is None or same_source.source_id != source_id:
-                raise ValueError(
-                    "requested correction target is not a current same-source belief"
-                )
-        if same_source is not None:
-            committed.append(store.supersede(same_source.id, belief))
-        else:
-            committed.append(store.add_belief(belief))
+        committed.append(materialize_candidate(
+            store,
+            policy,
+            source=source,
+            event=event,
+            candidate=candidate,
+            as_of=as_of,
+            valid_from=timestamp,
+            expected_current_belief_id=expected,
+        ))
 
     return IngestResult(event=event, beliefs=committed)
 
