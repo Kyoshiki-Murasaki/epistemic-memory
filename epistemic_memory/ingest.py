@@ -13,7 +13,7 @@ time, from the trust matrix. Ingest never resolves conflicts itself.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable, Optional
 
 from .models import Belief, CandidateBelief, Event, IngestResult, TrustPolicy
@@ -25,10 +25,6 @@ Extractor = Callable[[Event, str], list[CandidateBelief]]
 LIVE_MODEL = "claude-sonnet-5"
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def ingest_event(
     store: Store,
     policy: TrustPolicy,
@@ -38,14 +34,21 @@ def ingest_event(
     scope: str,
     meta: Optional[dict] = None,
     extractor: Extractor,
+    as_of: datetime,
+    supersede_belief_id: Optional[int] = None,
 ) -> IngestResult:
     source = store.get_source(source_id)
     if source is None:
         raise ValueError(f"no such source: {source_id!r} (call add_source first)")
 
-    event = store.add_event(
-        Event(source_id=source_id, content=content, scope=scope, meta=meta, created_at=_now())
-    )
+    timestamp = as_of.isoformat()
+    event = store.add_event(Event(
+        source_id=source_id,
+        content=content,
+        scope=scope,
+        meta=meta,
+        created_at=timestamp,
+    ))
     candidates = extractor(event, source.type)
 
     committed: list[Belief] = []
@@ -60,11 +63,20 @@ def ingest_event(
             source_id=source_id,
             event_id=event.id,
             decision_type=candidate.decision_type,
-            valid_from=_now(),
-            created_at=_now(),
+            valid_from=timestamp,
+            created_at=timestamp,
         )
         existing = store.current_beliefs(candidate.entity, candidate.attribute)
-        same_source = next((b for b in existing if b.source_id == source_id), None)
+        if supersede_belief_id is None:
+            same_source = next((b for b in existing if b.source_id == source_id), None)
+        else:
+            same_source = next(
+                (b for b in existing if b.id == supersede_belief_id), None
+            )
+            if same_source is None or same_source.source_id != source_id:
+                raise ValueError(
+                    "requested correction target is not a current same-source belief"
+                )
         if same_source is not None:
             committed.append(store.supersede(same_source.id, belief))
         else:

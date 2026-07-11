@@ -20,6 +20,8 @@ from .commitments import (
 )
 from .ingest import Extractor, ingest_event, live_extractor
 from .models import (
+    ArtifactRegistrationRequest,
+    ArtifactRegistrationResult,
     AssembledContext,
     AssemblyRequest,
     CommitmentCreateRequest,
@@ -27,6 +29,10 @@ from .models import (
     CommitmentListResult,
     CommitmentMutationResult,
     CommitmentTransitionRequest,
+    CorrectionRequest,
+    CorrectionResult,
+    DependencyRegistrationRequest,
+    DependencyRegistrationResult,
     GateDecision,
     GateResult,
     IngestResult,
@@ -38,6 +44,11 @@ from .models import (
     TrustPolicy,
 )
 from .policy import gate as _gate
+from .propagate import (
+    correct_belief as _correct_belief,
+    register_artifact as _register_artifact,
+    register_dependency as _register_dependency,
+)
 from .retrieve import retrieve_beliefs
 from .store import Store
 
@@ -115,6 +126,7 @@ class MemoryStore:
             scope=scope,
             meta=meta,
             extractor=extractor,
+            as_of=self._authoritative_now(),
         )
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
@@ -171,8 +183,51 @@ class MemoryStore:
         source_types = {item.source.id: item.source.type for item in retrieval.items}
         return _gate(action, supporting, self.policy, source_types, agent_id=self.agent_id)
 
-    def correct(self, belief_id: int, *, reason: str):
-        raise NotImplementedError("correct lands in M6")
+    def register_artifact(
+        self, request: ArtifactRegistrationRequest
+    ) -> ArtifactRegistrationResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to register artifacts "
+                "(pass policy=load_policy(...))"
+            )
+        return _register_artifact(
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
+        )
+
+    def register_dependency(
+        self, request: DependencyRegistrationRequest
+    ) -> DependencyRegistrationResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to register dependencies "
+                "(pass policy=load_policy(...))"
+            )
+        return _register_dependency(
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
+        )
+
+    def correct(self, request: CorrectionRequest) -> CorrectionResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to correct beliefs "
+                "(pass policy=load_policy(...))"
+            )
+        return _correct_belief(
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
+        )
 
     def explain(self, trace_id: int):
         raise NotImplementedError("explain lands in M7")

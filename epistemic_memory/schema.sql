@@ -127,20 +127,77 @@ BEGIN
 END;
 
 -- ============================ artifacts + dependencies ====================
--- Derived things a correction can invalidate, and the belief edges they rest on.
+-- Derived things a correction can invalidate. What an artifact is, whether
+-- an action executed, and what propagation did to it are independent facts.
 CREATE TABLE IF NOT EXISTS artifacts (
-    id          INTEGER PRIMARY KEY,
-    kind        TEXT NOT NULL,
-    ref         TEXT NOT NULL,
-    state       TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    id                    INTEGER PRIMARY KEY,
+    kind                  TEXT NOT NULL CHECK (kind IN ('output', 'action')),
+    execution_state       TEXT NOT NULL CHECK (
+        execution_state IN ('not_applicable', 'pending', 'executed')
+    ),
+    propagation_state     TEXT NOT NULL CHECK (
+        propagation_state IN ('current', 'stale', 'halted', 'review_required')
+    ),
+    scope                 TEXT NOT NULL,
+    label                 TEXT NOT NULL,
+    reference             TEXT,
+    created_by_agent_id   TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    CHECK (
+        (kind = 'output' AND execution_state = 'not_applicable')
+        OR (kind = 'action' AND execution_state IN ('pending', 'executed'))
+    )
 );
 
+-- Propagation may change only its own state and timestamp. Stable identity,
+-- provenance, execution history, scope, and safe label/reference are immutable.
+CREATE TRIGGER IF NOT EXISTS artifacts_definition_no_update
+BEFORE UPDATE ON artifacts
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.kind IS NOT OLD.kind
+  OR NEW.execution_state IS NOT OLD.execution_state
+  OR NEW.scope IS NOT OLD.scope
+  OR NEW.label IS NOT OLD.label
+  OR NEW.reference IS NOT OLD.reference
+  OR NEW.created_by_agent_id IS NOT OLD.created_by_agent_id
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+    SELECT RAISE(ABORT, 'artifact definition is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS artifacts_no_delete BEFORE DELETE ON artifacts
+BEGIN
+    SELECT RAISE(ABORT, 'artifacts are never deleted');
+END;
+
+-- Explicit DAG edges. Exactly one upstream foreign key is populated; the
+-- downstream is always an artifact. Partial unique indexes make registration
+-- deterministic for both edge kinds.
 CREATE TABLE IF NOT EXISTS dependencies (
-    id          INTEGER PRIMARY KEY,
-    artifact_id INTEGER NOT NULL REFERENCES artifacts(id),
-    belief_id   INTEGER NOT NULL REFERENCES beliefs(id)
+    id                       INTEGER PRIMARY KEY,
+    upstream_belief_id       INTEGER REFERENCES beliefs(id),
+    upstream_artifact_id     INTEGER REFERENCES artifacts(id),
+    downstream_artifact_id   INTEGER NOT NULL REFERENCES artifacts(id),
+    created_by_agent_id      TEXT NOT NULL,
+    created_at               TEXT NOT NULL,
+    CHECK (
+        (upstream_belief_id IS NOT NULL AND upstream_artifact_id IS NULL)
+        OR (upstream_belief_id IS NULL AND upstream_artifact_id IS NOT NULL)
+    ),
+    CHECK (
+        upstream_artifact_id IS NULL
+        OR upstream_artifact_id != downstream_artifact_id
+    )
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS dependencies_belief_edge
+ON dependencies(upstream_belief_id, downstream_artifact_id)
+WHERE upstream_belief_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS dependencies_artifact_edge
+ON dependencies(upstream_artifact_id, downstream_artifact_id)
+WHERE upstream_artifact_id IS NOT NULL;
 
 -- ============================ audit_traces ================================
 -- One row per assembled context / gate decision / action. `explain` reads these.

@@ -53,6 +53,65 @@ class CommitmentOperation(str, Enum):
     scan_overdue = "scan_overdue"
 
 
+class MemoryOperation(str, Enum):
+    correct = "correct"
+    register_artifact = "register_artifact"
+    register_dependency = "register_dependency"
+
+
+class ArtifactKind(str, Enum):
+    output = "output"
+    action = "action"
+
+
+class ArtifactExecutionState(str, Enum):
+    not_applicable = "not_applicable"
+    pending = "pending"
+    executed = "executed"
+
+
+class ArtifactPropagationState(str, Enum):
+    current = "current"
+    stale = "stale"
+    halted = "halted"
+    review_required = "review_required"
+
+
+class DependencyEndpointKind(str, Enum):
+    belief = "belief"
+    artifact = "artifact"
+
+
+class CorrectionKind(str, Enum):
+    correction = "correction"
+    retraction = "retraction"
+
+
+class M6ResultCode(str, Enum):
+    artifact_registered = "artifact_registered"
+    dependency_registered = "dependency_registered"
+    agent_unknown = "agent_unknown"
+    operation_not_permitted = "operation_not_permitted"
+    scope_context_missing = "scope_context_missing"
+    scope_denied = "scope_denied"
+    target_belief_not_found = "target_belief_not_found"
+    target_belief_not_current = "target_belief_not_current"
+    source_mismatch = "source_mismatch"
+    invalid_correction = "invalid_correction"
+    artifact_not_found = "artifact_not_found"
+    dependency_endpoint_not_found = "dependency_endpoint_not_found"
+    dependency_scope_incompatible = "dependency_scope_incompatible"
+    dependency_self_edge = "dependency_self_edge"
+    dependency_duplicate = "dependency_duplicate"
+    dependency_cycle = "dependency_cycle"
+    correction_applied = "correction_applied"
+    artifact_marked_stale = "artifact_marked_stale"
+    pending_action_halted = "pending_action_halted"
+    executed_action_requires_review = "executed_action_requires_review"
+    hidden_downstream_impacts = "hidden_downstream_impacts"
+    atomic_propagation_failure = "atomic_propagation_failure"
+
+
 class CommitmentResultCode(str, Enum):
     commitment_created = "commitment_created"
     commitment_transitioned = "commitment_transitioned"
@@ -372,12 +431,199 @@ class OverdueScanResult(BaseModel):
     exclusions: list[CommitmentExclusionSummary]
 
 
-class Artifact(BaseModel):
-    id: Optional[int] = None
-    kind: str
-    ref: str
-    state: str
-    created_at: str
+class ArtifactRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ArtifactKind
+    execution_state: ArtifactExecutionState
+    scope: Optional[str]
+    label: str
+    reference: Optional[str] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, value: str) -> str:
+        return _commitment_text(value, "label", 512)
+
+    @field_validator("reference")
+    @classmethod
+    def validate_reference(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _commitment_text(value, "reference", 2048)
+
+    @model_validator(mode="after")
+    def validate_kind_and_execution(self):
+        if (
+            self.kind == ArtifactKind.output
+            and self.execution_state != ArtifactExecutionState.not_applicable
+        ):
+            raise ValueError("output artifacts require not_applicable execution state")
+        if (
+            self.kind == ArtifactKind.action
+            and self.execution_state == ArtifactExecutionState.not_applicable
+        ):
+            raise ValueError("action artifacts require pending or executed state")
+        return self
+
+
+class Artifact(ArtifactRegistrationRequest):
+    id: int = Field(gt=0)
+    scope: str
+    propagation_state: ArtifactPropagationState
+    created_by_agent_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_by_agent_id")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _commitment_text(value, "created_by_agent_id", 256)
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def validate_lifecycle_timestamp(cls, value: datetime, info) -> datetime:
+        return _aware_utc(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_timestamp_order(self):
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must not be before created_at")
+        return self
+
+
+class DependencyRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upstream_kind: DependencyEndpointKind
+    upstream_id: int = Field(gt=0)
+    downstream_artifact_id: int = Field(gt=0)
+    scope: Optional[str]
+    task_type: Optional[str] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class Dependency(BaseModel):
+    id: int = Field(gt=0)
+    upstream_kind: DependencyEndpointKind
+    upstream_id: int = Field(gt=0)
+    downstream_artifact_id: int = Field(gt=0)
+    created_by_agent_id: str
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_timestamp(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "created_at")
+
+    @field_validator("created_by_agent_id")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _commitment_text(value, "created_by_agent_id", 256)
+
+
+class CorrectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    belief_id: int = Field(gt=0)
+    kind: CorrectionKind
+    source_id: str
+    content: str = Field(min_length=1, max_length=4096)
+    scope: Optional[str]
+    task_type: Optional[str] = None
+    value: Optional[str] = None
+    proposed_status: Optional[EpistemicStatus] = None
+
+    @field_validator("source_id", "content")
+    @classmethod
+    def validate_text(cls, value: str, info) -> str:
+        return _nonempty(value, info.field_name)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: Optional[str]) -> Optional[str]:
+        return _nonempty(value, "value") if value is not None else None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class ArtifactRegistrationResult(BaseModel):
+    ok: bool
+    code: M6ResultCode
+    message: str
+    artifact: Optional[Artifact] = None
+
+
+class DependencyRegistrationResult(BaseModel):
+    ok: bool
+    code: M6ResultCode
+    message: str
+    dependency: Optional[Dependency] = None
+
+
+class ArtifactImpact(BaseModel):
+    artifact: Artifact
+    depth: int = Field(ge=1)
+    previous_state: ArtifactPropagationState
+    reason_code: M6ResultCode
+    rule_id: str
+    state_changed: bool
+
+
+class HiddenImpactSummary(BaseModel):
+    reason_code: M6ResultCode
+    rule_id: str
+    count: int = Field(ge=0)
+    safe_detail: str
+
+
+class CorrectionResult(BaseModel):
+    ok: bool
+    code: M6ResultCode
+    message: str
+    as_of: datetime
+    event: Optional[Event] = None
+    belief: Optional[Belief] = None
+    visible_impacts: list[ArtifactImpact] = Field(default_factory=list)
+    hidden_impacts: list[HiddenImpactSummary] = Field(default_factory=list)
+    affected_count: int = Field(default=0, ge=0)
+
+    @field_validator("as_of")
+    @classmethod
+    def validate_timestamp(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "as_of")
 
 
 class IngestResult(BaseModel):
@@ -446,6 +692,7 @@ class AgentPermissions(_PolicyModel):
     max_action_tier: RiskTier
     allowed_scopes: list[str]
     commitment_operations: list[CommitmentOperation] = Field(default_factory=list)
+    memory_operations: list[MemoryOperation] = Field(default_factory=list)
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -467,6 +714,15 @@ class AgentPermissions(_PolicyModel):
     ) -> list[CommitmentOperation]:
         if len(values) != len(set(values)):
             raise ValueError("commitment_operations entries must be unique")
+        return values
+
+    @field_validator("memory_operations")
+    @classmethod
+    def validate_memory_operations(
+        cls, values: list[MemoryOperation]
+    ) -> list[MemoryOperation]:
+        if len(values) != len(set(values)):
+            raise ValueError("memory_operations entries must be unique")
         return values
 
 

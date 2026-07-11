@@ -1,8 +1,8 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M5 complete and clock-authority-audited (142 tests passing). M5 adds
-first-class scoped commitments, explicit policy operations, creator-bound
-manual transitions, and store-clock-authoritative overdue promotion.**
+Status: **M0–M6 complete (172 tests passing). M6 adds explicit correction and
+graph-mutation authority, typed scoped artifacts, a deterministic dependency
+DAG, and atomic hidden-scope-safe correction propagation.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
 the final gate); `AI Memory System.markdown` is the WHY where the spec is silent.
 
@@ -44,12 +44,16 @@ Both involve the same structural key `(entity, attribute)`, but:
 This matches the spec but the spec doesn't state the rule explicitly, so flagging it. It means
 `current_beliefs(entity, attribute)` can return >1 row (a live conflict).
 
-### D3 — Two tables beyond the spec's named six
+### D3 — Artifact and dependency tables
 Spec names `events, beliefs, sources, commitments, dependencies, audit_traces`. I add two small
 supporting tables:
-- `artifacts` — the derived things propagation acts on (summary / pending_action / reply), each
-  with a `state`. `dependencies` stays as the spec's edge table (artifact → belief). Without
-  this, an artifact's state would be duplicated across every dependency row.
+- `artifacts` — the derived things propagation acts on, separating `kind` (`output|action`),
+  execution history (`not_applicable|pending|executed`), and propagation state
+  (`current|stale|halted|review_required`). Stable identity, scope, creator, label/reference,
+  execution history, and creation time are immutable; artifacts cannot be deleted.
+- `dependencies` — explicit belief→artifact and artifact→artifact edges. Foreign keys prevent
+  dangling endpoints, partial unique indexes prevent duplicate edges, and the M6 public API
+  enforces scope compatibility, no self-edges, and a DAG invariant.
 - `proposals` — the `--propose` approval queue (M7). One row per queued candidate belief.
 
 Plus a `beliefs_fts` FTS5 virtual table for M4 retrieval. All minimal; flagging for visibility.
@@ -160,16 +164,24 @@ CREATE TABLE commitments (
 -- ============================ artifacts + dependencies ====================
 -- Derived things a correction can invalidate, and the belief edges they rest on.
 CREATE TABLE artifacts (
-    id          INTEGER PRIMARY KEY,
-    kind        TEXT NOT NULL,               -- summary|pending_action|reply|decision
-    ref         TEXT NOT NULL,               -- human label / external ref
-    state       TEXT NOT NULL,               -- active|stale|halted|needs_review
-    created_at  TEXT NOT NULL
+    id                    INTEGER PRIMARY KEY,
+    kind                  TEXT NOT NULL,      -- output|action
+    execution_state       TEXT NOT NULL,      -- not_applicable|pending|executed
+    propagation_state     TEXT NOT NULL,      -- current|stale|halted|review_required
+    scope                 TEXT NOT NULL,
+    label                 TEXT NOT NULL,
+    reference             TEXT,
+    created_by_agent_id   TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
 );
 CREATE TABLE dependencies (
-    id          INTEGER PRIMARY KEY,
-    artifact_id INTEGER NOT NULL REFERENCES artifacts(id),
-    belief_id   INTEGER NOT NULL REFERENCES beliefs(id)
+    id                       INTEGER PRIMARY KEY,
+    upstream_belief_id       INTEGER REFERENCES beliefs(id),
+    upstream_artifact_id     INTEGER REFERENCES artifacts(id),
+    downstream_artifact_id   INTEGER NOT NULL REFERENCES artifacts(id),
+    created_by_agent_id      TEXT NOT NULL,
+    created_at               TEXT NOT NULL
 );
 
 -- ============================ audit_traces ================================
@@ -278,8 +290,10 @@ class Commitment(BaseModel):
     created_at: str; updated_at: str
 
 class Artifact(BaseModel):
-    id: Optional[int] = None
-    kind: str; ref: str; state: str; created_at: str
+    id: int; kind: ArtifactKind; execution_state: ArtifactExecutionState
+    propagation_state: ArtifactPropagationState; scope: str
+    label: str; reference: Optional[str]; created_by_agent_id: str
+    created_at: datetime; updated_at: datetime
 
 # --- policy models (loaded from trust_policy.yaml) ---
 class TrustRule(BaseModel):
@@ -355,8 +369,12 @@ class MemoryStore:
     # caller can never pass a decision_type inconsistent with the action itself.
     def gate(self, *, action, entity, scope, task_type=None) -> GateResult: ...
 
-    # correct (M6) — invalidate/supersede a belief and propagate through dependencies
-    def correct(self, belief_id, *, reason) -> PropagationReport: ...
+    # M6 — explicit artifact graph registration and atomic correction propagation
+    def register_artifact(self, request: ArtifactRegistrationRequest
+                          ) -> ArtifactRegistrationResult: ...
+    def register_dependency(self, request: DependencyRegistrationRequest
+                            ) -> DependencyRegistrationResult: ...
+    def correct(self, request: CorrectionRequest) -> CorrectionResult: ...
 
     # explain (M7) — why-chain for a trace id
     def explain(self, trace_id) -> str: ...
@@ -429,10 +447,15 @@ class MemoryStore:
   → verified: `.venv/bin/python -m pytest -vv tests/test_commitments.py` — **55 passed**;
   full suite — **142 passed**.
 
-- **M6 — propagation.** `propagate.py`: on invalidation, walk `dependencies`, mark summaries
-  stale, halt pending actions, report executed ones.
-  → verify: `pytest tests/test_propagate.py` — correcting a belief flips its summary to `stale`
-  and a pending action to `halted`, and lists them.
+- **M6 — propagation. (done)** `propagate.py`: explicit policy-controlled artifact and DAG
+  registration; same-source append-only correction/retraction through the clamped ingest path;
+  cycle-safe deterministic transitive traversal; outputs become stale, pending actions halt,
+  and executed actions remain executed but require review. Correction creation and every
+  reachable artifact update share one SQLite transaction and one store-clock sample. Safety
+  propagation crosses response-visibility boundaries while the typed result exposes hidden
+  effects only as safe counts/rule codes.
+  → verified: `.venv/bin/python -m pytest -vv tests/test_propagation.py` — **30 passed**;
+  full suite — **172 passed**.
 
 - **M7 — audit + trust modes.** `audit.py` (`explain(trace_id)`), `--propose` approval queue,
   ephemeral no-write sessions. No silent commits anywhere.

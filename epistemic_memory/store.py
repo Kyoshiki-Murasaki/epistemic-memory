@@ -10,23 +10,25 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .models import (
+    Artifact,
+    ArtifactPropagationState,
+    ArtifactRegistrationRequest,
     Belief,
     Commitment,
     CommitmentCreateRequest,
     CommitmentPrecondition,
     CommitmentState,
+    Dependency,
+    DependencyEndpointKind,
     Event,
     Source,
 )
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _row_to_belief(row: sqlite3.Row, *, is_current: bool) -> Belief:
@@ -68,30 +70,122 @@ def _row_to_commitment(row: sqlite3.Row) -> Commitment:
     )
 
 
+def _row_to_artifact(row: sqlite3.Row) -> Artifact:
+    return Artifact(
+        id=row["id"],
+        kind=row["kind"],
+        execution_state=row["execution_state"],
+        propagation_state=row["propagation_state"],
+        scope=row["scope"],
+        label=row["label"],
+        reference=row["reference"],
+        created_by_agent_id=row["created_by_agent_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_dependency(row: sqlite3.Row) -> Dependency:
+    if row["upstream_belief_id"] is not None:
+        upstream_kind = DependencyEndpointKind.belief
+        upstream_id = row["upstream_belief_id"]
+    else:
+        upstream_kind = DependencyEndpointKind.artifact
+        upstream_id = row["upstream_artifact_id"]
+    return Dependency(
+        id=row["id"],
+        upstream_kind=upstream_kind,
+        upstream_id=upstream_id,
+        downstream_artifact_id=row["downstream_artifact_id"],
+        created_by_agent_id=row["created_by_agent_id"],
+        created_at=row["created_at"],
+    )
+
+
 class Store:
     def __init__(self, db_path: str):
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        schema = (Path(__file__).parent / "schema.sql").read_text()
-        self.conn.executescript(schema)
-        # Rebuild is idempotent and backfills beliefs created by a pre-FTS
-        # schema without mutating the append-only belief rows.
-        self.conn.execute("INSERT INTO beliefs_fts(beliefs_fts) VALUES ('rebuild')")
+        try:
+            self._prepare_m6_tables()
+            schema = (Path(__file__).parent / "schema.sql").read_text()
+            self.conn.executescript(schema)
+            # Rebuild is idempotent and backfills beliefs created by a pre-FTS
+            # schema without mutating the append-only belief rows.
+            self.conn.execute("INSERT INTO beliefs_fts(beliefs_fts) VALUES ('rebuild')")
+            self.conn.commit()
+        except BaseException:
+            self.conn.close()
+            raise
+        self._transaction_depth = 0
+
+    def _prepare_m6_tables(self) -> None:
+        """Upgrade the unused M0-M5 artifact placeholders without guessing.
+
+        The accepted M5 schema created these tables before any public API could
+        populate them. Empty placeholders can therefore be replaced safely. If
+        out-of-band rows exist, fail closed rather than inventing their missing
+        scope, execution history, or provenance.
+        """
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(artifacts)").fetchall()
+        }
+        if not columns or "execution_state" in columns:
+            return
+        artifact_count = self.conn.execute(
+            "SELECT COUNT(*) FROM artifacts"
+        ).fetchone()[0]
+        dependency_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dependencies'"
+        ).fetchone()
+        dependency_count = (
+            self.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0]
+            if dependency_table is not None
+            else 0
+        )
+        if artifact_count or dependency_count:
+            raise RuntimeError(
+                "pre-M6 artifact rows lack required scope and execution provenance"
+            )
+        if dependency_table is not None:
+            self.conn.execute("DROP TABLE dependencies")
+        self.conn.execute("DROP TABLE artifacts")
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
 
+    def _commit(self) -> None:
+        if self._transaction_depth == 0:
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """One local SQLite transaction for an atomic public operation."""
+        if self._transaction_depth != 0:
+            raise RuntimeError("nested store transactions are not supported")
+        self.conn.execute("BEGIN")
+        self._transaction_depth = 1
+        try:
+            yield
+        except BaseException:
+            self.conn.rollback()
+            raise
+        else:
+            self.conn.commit()
+        finally:
+            self._transaction_depth = 0
+
     # ------------------------------- sources -------------------------------
 
     def add_source(self, source: Source) -> Source:
-        source = source.model_copy(update={"created_at": source.created_at or _now()})
         self.conn.execute(
             "INSERT INTO sources (id, type, label, created_at) VALUES (?, ?, ?, ?)",
             (source.id, source.type, source.label, source.created_at),
         )
-        self.conn.commit()
+        self._commit()
         return source
 
     def get_source(self, source_id: str) -> Optional[Source]:
@@ -109,7 +203,7 @@ class Store:
             "VALUES (?, ?, ?, ?, ?)",
             (event.source_id, event.content, event.scope, meta_json, event.created_at),
         )
-        self.conn.commit()
+        self._commit()
         return event.model_copy(update={"id": cur.lastrowid})
 
     # ------------------------------- beliefs -------------------------------
@@ -146,7 +240,7 @@ class Store:
                 belief.created_at,
             ),
         )
-        self.conn.commit()
+        self._commit()
         return belief.model_copy(update={"id": cur.lastrowid, "is_current": True})
 
     def supersede(self, old_belief_id: int, new_belief: Belief) -> Belief:
@@ -331,6 +425,156 @@ class Store:
         chain.reverse()
         return chain
 
+    # ----------------------- artifacts + dependencies ---------------------
+
+    def add_artifact(
+        self,
+        request: ArtifactRegistrationRequest,
+        *,
+        created_by_agent_id: str,
+        created_at: datetime,
+    ) -> Artifact:
+        if request.scope is None:
+            raise ValueError("artifact scope is required")
+        timestamp = created_at.isoformat()
+        cur = self.conn.execute(
+            "INSERT INTO artifacts (kind, execution_state, propagation_state, scope, "
+            "label, reference, created_by_agent_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.kind.value,
+                request.execution_state.value,
+                ArtifactPropagationState.current.value,
+                request.scope,
+                request.label,
+                request.reference,
+                created_by_agent_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        self._commit()
+        artifact = self.get_artifact(int(cur.lastrowid))
+        if artifact is None:
+            raise RuntimeError("inserted artifact could not be reloaded")
+        return artifact
+
+    def get_artifact(self, artifact_id: int) -> Optional[Artifact]:
+        row = self.conn.execute(
+            "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
+        ).fetchone()
+        return _row_to_artifact(row) if row is not None else None
+
+    def list_artifacts(self) -> list[Artifact]:
+        rows = self.conn.execute("SELECT * FROM artifacts ORDER BY id").fetchall()
+        return [_row_to_artifact(row) for row in rows]
+
+    def set_artifact_propagation_state(
+        self,
+        artifact_id: int,
+        *,
+        state: ArtifactPropagationState,
+        updated_at: datetime,
+    ) -> tuple[Artifact, ArtifactPropagationState, bool]:
+        current = self.get_artifact(artifact_id)
+        if current is None:
+            raise ValueError(f"no such artifact: {artifact_id}")
+        if updated_at < current.updated_at:
+            raise ValueError("artifact timestamp must not move backward")
+        previous = current.propagation_state
+        changed = previous != state
+        if changed:
+            self.conn.execute(
+                "UPDATE artifacts SET propagation_state = ?, updated_at = ? WHERE id = ?",
+                (state.value, updated_at.isoformat(), artifact_id),
+            )
+            self._commit()
+        stored = self.get_artifact(artifact_id)
+        if stored is None:
+            raise RuntimeError("updated artifact could not be reloaded")
+        return stored, previous, changed
+
+    def get_dependency(
+        self,
+        upstream_kind: DependencyEndpointKind,
+        upstream_id: int,
+        downstream_artifact_id: int,
+    ) -> Optional[Dependency]:
+        column = (
+            "upstream_belief_id"
+            if upstream_kind == DependencyEndpointKind.belief
+            else "upstream_artifact_id"
+        )
+        row = self.conn.execute(
+            f"SELECT * FROM dependencies WHERE {column} = ? "
+            "AND downstream_artifact_id = ?",
+            (upstream_id, downstream_artifact_id),
+        ).fetchone()
+        return _row_to_dependency(row) if row is not None else None
+
+    def add_dependency(
+        self,
+        upstream_kind: DependencyEndpointKind,
+        upstream_id: int,
+        downstream_artifact_id: int,
+        *,
+        created_by_agent_id: str,
+        created_at: datetime,
+    ) -> Dependency:
+        upstream_belief_id = (
+            upstream_id if upstream_kind == DependencyEndpointKind.belief else None
+        )
+        upstream_artifact_id = (
+            upstream_id if upstream_kind == DependencyEndpointKind.artifact else None
+        )
+        cur = self.conn.execute(
+            "INSERT INTO dependencies (upstream_belief_id, upstream_artifact_id, "
+            "downstream_artifact_id, created_by_agent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                upstream_belief_id,
+                upstream_artifact_id,
+                downstream_artifact_id,
+                created_by_agent_id,
+                created_at.isoformat(),
+            ),
+        )
+        self._commit()
+        row = self.conn.execute(
+            "SELECT * FROM dependencies WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("inserted dependency could not be reloaded")
+        return _row_to_dependency(row)
+
+    def downstream_artifact_ids(
+        self, upstream_kind: DependencyEndpointKind, upstream_id: int
+    ) -> list[int]:
+        column = (
+            "upstream_belief_id"
+            if upstream_kind == DependencyEndpointKind.belief
+            else "upstream_artifact_id"
+        )
+        rows = self.conn.execute(
+            f"SELECT downstream_artifact_id FROM dependencies WHERE {column} = ? "
+            "ORDER BY downstream_artifact_id",
+            (upstream_id,),
+        ).fetchall()
+        return [int(row["downstream_artifact_id"]) for row in rows]
+
+    def artifact_adjacency(self) -> dict[int, list[int]]:
+        rows = self.conn.execute(
+            "SELECT upstream_artifact_id, downstream_artifact_id FROM dependencies "
+            "WHERE upstream_artifact_id IS NOT NULL "
+            "ORDER BY upstream_artifact_id, downstream_artifact_id"
+        ).fetchall()
+        adjacency: dict[int, list[int]] = {}
+        for row in rows:
+            adjacency.setdefault(int(row["upstream_artifact_id"]), []).append(
+                int(row["downstream_artifact_id"])
+            )
+        return adjacency
+
     # ----------------------------- commitments ----------------------------
 
     def add_commitment(
@@ -368,7 +612,7 @@ class Store:
                 created_at_text,
             ),
         )
-        self.conn.commit()
+        self._commit()
         stored = self.get_commitment(int(cur.lastrowid))
         if stored is None:
             raise RuntimeError("inserted commitment could not be reloaded")
@@ -463,7 +707,7 @@ class Store:
         if cur.rowcount != 1:
             self.conn.rollback()
             raise RuntimeError("commitment state changed during transition")
-        self.conn.commit()
+        self._commit()
         stored = self.get_commitment(commitment_id)
         if stored is None:
             raise RuntimeError("transitioned commitment could not be reloaded")
