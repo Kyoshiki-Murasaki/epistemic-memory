@@ -1,8 +1,8 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M3 complete and takeover-audited (60 tests passing). `02_SPEC.md`/`03_CLAUDE_CODE_PROMPT.md`/
-`05_ADOPTION_STRATEGY.md` are mutually consistent (11 components, 11-step demo,
-MemGov-Bench in success criteria). Starting M4.**
+Status: **M0–M5 complete and takeover-audited (135 tests passing). M5 adds
+first-class scoped commitments, explicit policy operations, creator-bound
+manual transitions, and deterministic overdue promotion.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
 the final gate); `AI Memory System.markdown` is the WHY where the spec is silent.
 
@@ -361,8 +361,19 @@ class MemoryStore:
     # explain (M7) — why-chain for a trace id
     def explain(self, trace_id) -> str: ...
 
-    # commitments (M5) — not one of the 6 spec verbs, but part of the same public surface
-    def add_commitment(self, ...) -> Commitment: ...
+    # commitments (M5) — typed operations on the same public service boundary
+    def add_commitment(
+        self, request: CommitmentCreateRequest
+    ) -> CommitmentMutationResult: ...
+    def transition_commitment(
+        self, request: CommitmentTransitionRequest
+    ) -> CommitmentMutationResult: ...
+    def list_commitments(
+        self, request: CommitmentListRequest
+    ) -> CommitmentListResult: ...
+    def surface_overdue(
+        self, request: OverdueScanRequest
+    ) -> OverdueScanResult: ...
 ```
 
 `store.py` holds the SQLite DAL (the only other module allowed to import sqlite3); `core.py`'s
@@ -406,9 +417,14 @@ class MemoryStore:
   → verify: `pytest tests/test_retrieve.py tests/test_assemble.py` — snapshot of rendered
   blocks; pixel-art scope-leak excluded; duplicates collapsed; `tokens_injected` reported.
 
-- **M5 — commitments.** `commitments.py` + state machine; overdue surfacing against a fixed
-  demo clock.
-  → verify: `pytest tests/test_commitments.py` — open→waiting→fulfilled and →overdue transitions.
+- **M5 — commitments. (done)** `commitments.py` owns the single transition table;
+  `created_by_agent_id` is immutable and separate from the domain `owner`; policy grants
+  explicit `create`, `transition`, and `scan_overdue` operations. Manual transitions are
+  creator-bound. Overdue promotion requires `scan_overdue`, uses an explicit aware-UTC
+  `as_of`, promotes every authorized eligible record only when `as_of > deadline`, and is
+  idempotent. Reading remains governed only by the existing task/agent scope intersection.
+  → verified: `.venv/bin/python -m pytest -vv tests/test_commitments.py` — **48 passed**;
+  full suite — **135 passed**.
 
 - **M6 — propagation.** `propagate.py`: on invalidation, walk `dependencies`, mark summaries
   stale, halt pending actions, report executed ones.

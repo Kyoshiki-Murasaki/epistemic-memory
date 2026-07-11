@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -46,7 +47,35 @@ class CommitmentState(str, Enum):
     overdue = "overdue"
 
 
-_SCOPE_RE = re.compile(r"^(global|persona)$|^(project|task_type):(.+)$")
+class CommitmentOperation(str, Enum):
+    create = "create"
+    transition = "transition"
+    scan_overdue = "scan_overdue"
+
+
+class CommitmentResultCode(str, Enum):
+    commitment_created = "commitment_created"
+    commitment_transitioned = "commitment_transitioned"
+    commitments_listed = "commitments_listed"
+    overdue_scan_completed = "overdue_scan_completed"
+    agent_unknown = "agent_unknown"
+    operation_not_permitted = "operation_not_permitted"
+    managing_agent_required = "managing_agent_required"
+    scope_context_missing = "scope_context_missing"
+    scope_denied = "scope_denied"
+    commitment_not_found = "commitment_not_found"
+    state_unknown = "state_unknown"
+    transition_invalid = "transition_invalid"
+    overdue_scan_required = "overdue_scan_required"
+    precondition_unsatisfied = "precondition_unsatisfied"
+    proof_required = "proof_required"
+    proof_reference_invalid = "proof_reference_invalid"
+    proof_not_applicable = "proof_not_applicable"
+
+
+_SCOPE_RE = re.compile(
+    r"^(global|persona)$|^(project|task_type):([A-Za-z0-9][A-Za-z0-9._/-]{0,127})$"
+)
 
 
 class Scope(BaseModel):
@@ -162,17 +191,195 @@ class CandidateBelief(BaseModel):
         return _scope(value)
 
 
-class Commitment(BaseModel):
-    id: Optional[int] = None
+def _aware_utc(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _commitment_text(value: str, field_name: str, maximum: int) -> str:
+    _nonempty(value, field_name)
+    if len(value) > maximum:
+        raise ValueError(f"{field_name} must be at most {maximum} characters")
+    return value
+
+
+class CommitmentPrecondition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    belief_id: int = Field(gt=0)
+    require_uncontradicted: bool = False
+
+
+class _CommitmentDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     description: str
     owner: str
     beneficiary: str
+    scope: Optional[str]
+    deadline: datetime
+    preconditions: list[CommitmentPrecondition] = Field(default_factory=list)
+    proof_required: bool = False
+    created_at: datetime
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return _commitment_text(value, "description", 4096)
+
+    @field_validator("owner", "beneficiary")
+    @classmethod
+    def validate_party(cls, value: str, info) -> str:
+        return _commitment_text(value, info.field_name, 256)
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("created_at", "deadline")
+    @classmethod
+    def validate_timestamp(cls, value: datetime, info) -> datetime:
+        return _aware_utc(value, info.field_name)
+
+    @field_validator("preconditions")
+    @classmethod
+    def validate_preconditions(
+        cls, values: list[CommitmentPrecondition]
+    ) -> list[CommitmentPrecondition]:
+        ids = [value.belief_id for value in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("precondition belief references must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_deadline(self):
+        if self.deadline < self.created_at:
+            raise ValueError("deadline must not be before created_at")
+        return self
+
+
+class CommitmentCreateRequest(_CommitmentDefinition):
+    """Typed input for ``MemoryStore.add_commitment``.
+
+    ``scope`` is optional at the API boundary only so missing context can
+    return a structured fail-closed result. Definition validation still runs
+    whenever a scope is supplied.
+    """
+
+    scope: Optional[str]
+
+
+class Commitment(_CommitmentDefinition):
+    id: int = Field(gt=0)
+    scope: str
+    created_by_agent_id: str
     state: CommitmentState
-    deadline: Optional[str] = None
-    preconditions: Optional[str] = None
-    proof_belief_id: Optional[int] = None
-    created_at: str
-    updated_at: str
+    proof_reference: Optional[str] = None
+    updated_at: datetime
+
+    @field_validator("created_by_agent_id")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _commitment_text(value, "created_by_agent_id", 256)
+
+    @field_validator("updated_at")
+    @classmethod
+    def validate_updated_at(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "updated_at")
+
+
+class CommitmentTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_id: int = Field(gt=0)
+    target_state: str
+    scope: Optional[str]
+    task_type: Optional[str] = None
+    as_of: datetime
+    proof_reference: Optional[str] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+    @field_validator("as_of")
+    @classmethod
+    def validate_as_of(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "as_of")
+
+
+class CommitmentListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Optional[str]
+    task_type: Optional[str] = None
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Optional[str]) -> Optional[str]:
+        return _scope(value) if value is not None else None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = _nonempty(value, "task_type")
+        if ":" in value:
+            raise ValueError("task_type must be the bare task name, not a scope string")
+        return value
+
+
+class OverdueScanRequest(CommitmentListRequest):
+    as_of: datetime
+
+    @field_validator("as_of")
+    @classmethod
+    def validate_as_of(cls, value: datetime) -> datetime:
+        return _aware_utc(value, "as_of")
+
+
+class CommitmentExclusionSummary(BaseModel):
+    reason_code: str
+    rule_id: str
+    count: int = Field(ge=0)
+    safe_detail: str
+
+
+class CommitmentMutationResult(BaseModel):
+    ok: bool
+    code: CommitmentResultCode
+    message: str
+    commitment: Optional[Commitment] = None
+
+
+class CommitmentListResult(BaseModel):
+    authorized: bool
+    code: CommitmentResultCode
+    commitments: list[Commitment]
+    exclusions: list[CommitmentExclusionSummary]
+
+
+class OverdueScanResult(BaseModel):
+    authorized: bool
+    code: CommitmentResultCode
+    as_of: datetime
+    overdue: list[Commitment]
+    promoted_count: int = Field(ge=0)
+    exclusions: list[CommitmentExclusionSummary]
 
 
 class Artifact(BaseModel):
@@ -248,6 +455,7 @@ class ActionSpec(_PolicyModel):
 class AgentPermissions(_PolicyModel):
     max_action_tier: RiskTier
     allowed_scopes: list[str]
+    commitment_operations: list[CommitmentOperation] = Field(default_factory=list)
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -260,6 +468,15 @@ class AgentPermissions(_PolicyModel):
             if value in {"project:*", "task_type:*"}:
                 continue
             _scope(value)
+        return values
+
+    @field_validator("commitment_operations")
+    @classmethod
+    def validate_commitment_operations(
+        cls, values: list[CommitmentOperation]
+    ) -> list[CommitmentOperation]:
+        if len(values) != len(set(values)):
+            raise ValueError("commitment_operations entries must be unique")
         return values
 
 

@@ -124,6 +124,8 @@ agents:
   support-agent:
     max_action_tier: irreversible
     allowed_scopes: ["global", "persona", "project:*", "task_type:*"]
+    commitment_operations: [create, transition, scan_overdue]
   analytics-bot:
     max_action_tier: informational
     allowed_scopes: ["global"]
+    commitment_operations: []

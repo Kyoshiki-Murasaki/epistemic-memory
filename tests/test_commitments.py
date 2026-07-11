@@ -1,0 +1,707 @@
+"""M5 verification: first-class commitments, authority, lifecycle, and time."""
+
+import sqlite3
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from epistemic_memory.core import MemoryStore
+from epistemic_memory.models import (
+    AgentPermissions,
+    Belief,
+    CommitmentCreateRequest,
+    CommitmentListRequest,
+    CommitmentOperation,
+    CommitmentPrecondition,
+    CommitmentResultCode,
+    CommitmentState,
+    CommitmentTransitionRequest,
+    EpistemicStatus,
+    OverdueScanRequest,
+    RiskTier,
+    Source,
+    TrustPolicy,
+)
+from epistemic_memory.policy import load_policy
+
+POLICY_PATH = str(Path(__file__).resolve().parents[1] / "trust_policy.yaml")
+CREATED = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+DEADLINE = CREATED + timedelta(days=5)
+
+
+@pytest.fixture
+def commitments(tmp_path):
+    db_path = str(tmp_path / "commitments.db")
+    policy = load_policy(POLICY_PATH)
+    memory = MemoryStore(db_path, policy, agent_id="support-agent")
+    memory._store.add_source(Source(
+        id="user",
+        type="user",
+        label="Customer chat",
+        created_at=CREATED.isoformat(),
+    ))
+    memory._store.add_source(Source(
+        id="billing",
+        type="billing_system",
+        label="Billing system",
+        created_at=CREATED.isoformat(),
+    ))
+    yield memory, policy, db_path
+    memory.close()
+
+
+def create_request(**overrides) -> CommitmentCreateRequest:
+    values = {
+        "description": "Refund the customer within 5 days.",
+        "owner": "refund-operations",
+        "beneficiary": "customer_881",
+        "scope": "project:support",
+        "created_at": CREATED,
+        "deadline": DEADLINE,
+        "preconditions": [],
+        "proof_required": False,
+    }
+    values.update(overrides)
+    return CommitmentCreateRequest(**values)
+
+
+def add(memory: MemoryStore, **overrides):
+    result = memory.add_commitment(create_request(**overrides))
+    assert result.ok is True
+    assert result.code == CommitmentResultCode.commitment_created
+    return result.commitment
+
+
+def transition(
+    memory: MemoryStore,
+    commitment_id: int,
+    target_state: str,
+    *,
+    scope: str | None = "project:support",
+    as_of: datetime = CREATED + timedelta(hours=1),
+    proof_reference: str | None = None,
+):
+    return memory.transition_commitment(CommitmentTransitionRequest(
+        commitment_id=commitment_id,
+        target_state=target_state,
+        scope=scope,
+        as_of=as_of,
+        proof_reference=proof_reference,
+    ))
+
+
+def add_belief(memory: MemoryStore, **overrides):
+    values = {
+        "entity": "order_4411",
+        "attribute": "payment_status",
+        "value": "paid",
+        "status": EpistemicStatus.system_verified,
+        "scope": "project:support",
+        "source_id": "billing",
+        "decision_type": "payment_status",
+        "valid_from": CREATED.isoformat(),
+        "created_at": CREATED.isoformat(),
+    }
+    values.update(overrides)
+    return memory._store.add_belief(Belief(**values))
+
+
+def test_create_first_class_commitment_with_distinct_owner_and_creator(commitments):
+    memory, _, _ = commitments
+    evidence = add_belief(memory)
+
+    commitment = add(
+        memory,
+        owner="refund-operations",
+        preconditions=[CommitmentPrecondition(
+            belief_id=evidence.id, require_uncontradicted=True
+        )],
+        proof_required=True,
+    )
+
+    assert commitment.id > 0
+    assert commitment.description == "Refund the customer within 5 days."
+    assert commitment.owner == "refund-operations"
+    assert commitment.owner != commitment.created_by_agent_id
+    assert commitment.created_by_agent_id == "support-agent"
+    assert commitment.beneficiary == "customer_881"
+    assert commitment.scope == "project:support"
+    assert commitment.state == CommitmentState.open
+    assert commitment.deadline == DEADLINE
+    assert commitment.preconditions[0].belief_id == evidence.id
+    assert commitment.proof_required is True
+
+
+def test_commitments_are_stored_separately_from_beliefs(commitments):
+    memory, _, _ = commitments
+    belief = add_belief(memory)
+    commitment = add(memory)
+
+    belief_rows = memory._store.conn.execute(
+        "SELECT id FROM beliefs ORDER BY id"
+    ).fetchall()
+    commitment_rows = memory._store.conn.execute(
+        "SELECT id FROM commitments ORDER BY id"
+    ).fetchall()
+
+    assert [row[0] for row in belief_rows] == [belief.id]
+    assert [row[0] for row in commitment_rows] == [commitment.id]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["waiting", "fulfilled", "cancelled"],
+)
+def test_every_open_transition_succeeds(commitments, target):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    result = transition(memory, commitment.id, target)
+
+    assert result.ok is True
+    assert result.code == CommitmentResultCode.commitment_transitioned
+    assert result.commitment.state == CommitmentState(target)
+
+
+@pytest.mark.parametrize("target", ["fulfilled", "cancelled"])
+def test_waiting_reaches_every_terminal_state(commitments, target):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    waiting = transition(memory, commitment.id, "waiting")
+    assert waiting.ok is True
+    result = transition(
+        memory, commitment.id, target, as_of=CREATED + timedelta(hours=2)
+    )
+
+    assert result.ok is True
+    assert result.commitment.state == CommitmentState(target)
+
+
+@pytest.mark.parametrize("terminal", ["fulfilled", "cancelled", "overdue"])
+def test_terminal_states_reject_all_outbound_transitions(commitments, terminal):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    if terminal == "overdue":
+        scanned = memory.surface_overdue(OverdueScanRequest(
+            scope="project:support", as_of=DEADLINE + timedelta(seconds=1)
+        ))
+        assert [item.id for item in scanned.overdue] == [commitment.id]
+    else:
+        assert transition(memory, commitment.id, terminal).ok
+
+    result = transition(
+        memory,
+        commitment.id,
+        "waiting",
+        as_of=DEADLINE + timedelta(days=1),
+    )
+
+    assert result.ok is False
+    assert result.code == CommitmentResultCode.transition_invalid
+    assert result.commitment is None
+
+
+def test_self_backward_unknown_state_and_unknown_id_are_structured(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    assert transition(memory, commitment.id, "waiting").ok
+
+    self_transition = transition(memory, commitment.id, "waiting")
+    backward = transition(memory, commitment.id, "open")
+    unknown_state = transition(memory, commitment.id, "paused")
+    unknown_id = transition(memory, 999_999, "waiting")
+
+    assert self_transition.code == CommitmentResultCode.transition_invalid
+    assert backward.code == CommitmentResultCode.transition_invalid
+    assert unknown_state.code == CommitmentResultCode.state_unknown
+    assert unknown_id.code == CommitmentResultCode.commitment_not_found
+
+
+def test_manual_overdue_selection_is_rejected_in_favor_of_full_scan(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+
+    manual = transition(
+        memory,
+        commitment.id,
+        "overdue",
+        as_of=DEADLINE + timedelta(seconds=1),
+    )
+    scan = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=DEADLINE + timedelta(seconds=1)
+    ))
+
+    assert manual.code == CommitmentResultCode.overdue_scan_required
+    assert [item.id for item in scan.overdue] == [commitment.id]
+
+
+def test_manual_transition_timestamp_cannot_move_backward(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    result = transition(
+        memory,
+        commitment.id,
+        "waiting",
+        as_of=CREATED - timedelta(seconds=1),
+    )
+    assert result.code == CommitmentResultCode.transition_invalid
+
+
+def test_direct_creation_in_terminal_state_is_not_part_of_typed_api():
+    raw = create_request().model_dump()
+    raw["state"] = "fulfilled"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CommitmentCreateRequest.model_validate(raw)
+    raw.pop("state")
+    raw["created_by_agent_id"] = "analytics-bot"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CommitmentCreateRequest.model_validate(raw)
+
+
+def test_fulfillment_enforces_present_current_usable_precondition(commitments):
+    memory, _, _ = commitments
+    evidence = add_belief(memory)
+    commitment = add(
+        memory,
+        preconditions=[CommitmentPrecondition(belief_id=evidence.id)],
+    )
+    memory._store.supersede(
+        evidence.id,
+        Belief(
+            entity=evidence.entity,
+            attribute=evidence.attribute,
+            value="FAILED",
+            status=EpistemicStatus.system_verified,
+            scope=evidence.scope,
+            source_id=evidence.source_id,
+            decision_type=evidence.decision_type,
+            valid_from=(CREATED + timedelta(hours=1)).isoformat(),
+            created_at=(CREATED + timedelta(hours=1)).isoformat(),
+        ),
+    )
+
+    result = transition(memory, commitment.id, "fulfilled")
+
+    assert result.ok is False
+    assert result.code == CommitmentResultCode.precondition_unsatisfied
+    assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
+
+
+def test_uncontradicted_precondition_reuses_structural_conflict_closure(commitments):
+    memory, _, _ = commitments
+    user_claim = add_belief(
+        memory,
+        value="paid",
+        status=EpistemicStatus.user_stated,
+        source_id="user",
+    )
+    add_belief(memory, value="FAILED")
+    commitment = add(
+        memory,
+        preconditions=[CommitmentPrecondition(
+            belief_id=user_claim.id, require_uncontradicted=True
+        )],
+    )
+
+    result = transition(memory, commitment.id, "fulfilled")
+
+    assert result.code == CommitmentResultCode.precondition_unsatisfied
+
+
+def test_required_proof_is_enforced_and_retained_after_fulfillment(commitments):
+    memory, _, _ = commitments
+    evidence = add_belief(memory)
+    commitment = add(
+        memory,
+        preconditions=[CommitmentPrecondition(belief_id=evidence.id)],
+        proof_required=True,
+    )
+
+    missing = transition(memory, commitment.id, "fulfilled")
+    fulfilled = transition(
+        memory,
+        commitment.id,
+        "fulfilled",
+        proof_reference="ticket:refund-4411",
+    )
+
+    assert missing.code == CommitmentResultCode.proof_required
+    assert fulfilled.ok is True
+    assert fulfilled.commitment.proof_reference == "ticket:refund-4411"
+    reloaded = memory.list_commitments(CommitmentListRequest(scope="project:support"))
+    assert reloaded.commitments[0].proof_reference == "ticket:refund-4411"
+
+
+@pytest.mark.parametrize(
+    "proof",
+    ["", " padded ", "bad\nproof", "bad\x01proof", "x" * 2049],
+)
+def test_malformed_proof_references_fail_with_structured_code(commitments, proof):
+    memory, _, _ = commitments
+    commitment = add(memory, proof_required=True)
+
+    result = transition(
+        memory, commitment.id, "fulfilled", proof_reference=proof
+    )
+
+    assert result.ok is False
+    assert result.code == CommitmentResultCode.proof_reference_invalid
+
+
+def test_proof_is_rejected_for_non_fulfillment_transition(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    result = transition(
+        memory, commitment.id, "waiting", proof_reference="ticket:4411"
+    )
+    assert result.code == CommitmentResultCode.proof_not_applicable
+
+
+def test_future_and_exact_deadline_are_not_overdue(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+
+    future = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=DEADLINE - timedelta(seconds=1)
+    ))
+    equality = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=DEADLINE
+    ))
+
+    assert future.overdue == []
+    assert equality.overdue == []
+    assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
+
+
+def test_open_and_waiting_promote_after_deadline_and_scan_is_idempotent(commitments):
+    memory, _, _ = commitments
+    open_commitment = add(memory)
+    waiting_commitment = add(memory, description="Waiting refund")
+    assert transition(memory, waiting_commitment.id, "waiting").ok
+    as_of = DEADLINE + timedelta(microseconds=1)
+
+    first = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=as_of
+    ))
+    second = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=as_of
+    ))
+
+    assert first.promoted_count == 2
+    assert second.promoted_count == 0
+    assert [item.id for item in first.overdue] == [open_commitment.id, waiting_commitment.id]
+    assert [item.id for item in second.overdue] == [open_commitment.id, waiting_commitment.id]
+    assert [item.model_dump() for item in second.overdue] == [
+        item.model_dump() for item in first.overdue
+    ]
+    assert all(item.state == CommitmentState.overdue for item in second.overdue)
+
+
+def test_fulfilled_and_cancelled_never_surface_as_overdue(commitments):
+    memory, _, _ = commitments
+    fulfilled = add(memory)
+    cancelled = add(memory, description="Cancelled refund")
+    assert transition(memory, fulfilled.id, "fulfilled").ok
+    assert transition(memory, cancelled.id, "cancelled").ok
+
+    scan = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=DEADLINE + timedelta(days=1)
+    ))
+
+    assert scan.overdue == []
+    assert memory._store.get_commitment(fulfilled.id).state == CommitmentState.fulfilled
+    assert memory._store.get_commitment(cancelled.id).state == CommitmentState.cancelled
+
+
+def test_overdue_order_is_deadline_then_creation_then_immutable_id(commitments):
+    memory, _, _ = commitments
+    later_deadline = add(
+        memory,
+        description="Later deadline",
+        deadline=DEADLINE + timedelta(hours=1),
+    )
+    first_tie = add(memory, description="First tie")
+    second_tie = add(memory, description="Second tie")
+
+    scan = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support", as_of=DEADLINE + timedelta(days=1)
+    ))
+
+    assert [item.id for item in scan.overdue] == [
+        first_tie.id,
+        second_tie.id,
+        later_deadline.id,
+    ]
+
+
+def test_task_scope_listing_excludes_secret_from_complete_serialization(commitments):
+    memory, _, _ = commitments
+    visible = add(memory, scope="project:banking", description="Visible banking work")
+    secret = "HOBBY_COMMITMENT_SECRET_MARKER"
+    add(memory, scope="project:hobby", description=secret, owner=secret, beneficiary=secret)
+
+    result = memory.list_commitments(CommitmentListRequest(scope="project:banking"))
+    serialized = result.model_dump_json()
+
+    assert [item.id for item in result.commitments] == [visible.id]
+    assert secret not in serialized
+    assert "project:hobby" not in serialized
+    assert next(
+        item.count for item in result.exclusions if item.rule_id == "C-SCOPE-TASK-001"
+    ) == 1
+
+
+def test_agent_scope_intersection_excludes_readable_task_secret(commitments):
+    memory, policy, db_path = commitments
+    global_commitment = add(memory, scope="global", description="Global work")
+    secret = "AGENT_SCOPE_COMMITMENT_SECRET"
+    add(memory, scope="project:banking", description=secret)
+    analytics = MemoryStore(db_path, policy, agent_id="analytics-bot")
+    try:
+        result = analytics.list_commitments(
+            CommitmentListRequest(scope="project:banking")
+        )
+    finally:
+        analytics.close()
+
+    assert [item.id for item in result.commitments] == [global_commitment.id]
+    assert secret not in result.model_dump_json()
+
+
+def test_missing_scope_context_fails_closed_for_all_public_commitment_paths(commitments):
+    memory, _, _ = commitments
+    create = memory.add_commitment(create_request(scope=None))
+    commitment = add(memory)
+    manual = transition(memory, commitment.id, "waiting", scope=None)
+    listing = memory.list_commitments(CommitmentListRequest(scope=None))
+    scan = memory.surface_overdue(OverdueScanRequest(
+        scope=None, as_of=DEADLINE + timedelta(days=1)
+    ))
+
+    assert create.code == CommitmentResultCode.scope_context_missing
+    assert manual.code == CommitmentResultCode.scope_context_missing
+    assert listing.code == CommitmentResultCode.scope_context_missing
+    assert listing.commitments == []
+    assert scan.code == CommitmentResultCode.scope_context_missing
+    assert scan.overdue == []
+
+
+def test_non_managing_known_agent_cannot_transition_scope_readable_commitment(commitments):
+    memory, policy, db_path = commitments
+    commitment = add(memory, scope="global")
+    peer = AgentPermissions(
+        max_action_tier=RiskTier.irreversible,
+        allowed_scopes=["global"],
+        commitment_operations=[CommitmentOperation.transition],
+    )
+    peer_policy = policy.model_copy(update={
+        "agents": {**policy.agents, "peer-agent": peer}
+    })
+    other = MemoryStore(db_path, peer_policy, agent_id="peer-agent")
+    try:
+        result = transition(other, commitment.id, "waiting", scope="global")
+    finally:
+        other.close()
+
+    assert result.code == CommitmentResultCode.managing_agent_required
+    assert result.commitment is None
+    assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
+
+
+def test_analytics_bot_cannot_create_transition_or_trigger_overdue_mutation(commitments):
+    memory, policy, db_path = commitments
+    commitment = add(memory, scope="global")
+    analytics = MemoryStore(db_path, policy, agent_id="analytics-bot")
+    try:
+        create = analytics.add_commitment(create_request(scope="global"))
+        manual = transition(
+            analytics, commitment.id, "waiting", scope="global"
+        )
+        scan = analytics.surface_overdue(OverdueScanRequest(
+            scope="global", as_of=DEADLINE + timedelta(days=1)
+        ))
+    finally:
+        analytics.close()
+
+    assert create.code == CommitmentResultCode.operation_not_permitted
+    assert manual.code == CommitmentResultCode.operation_not_permitted
+    assert scan.code == CommitmentResultCode.operation_not_permitted
+    assert scan.overdue == []
+    assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
+
+
+def test_unknown_agent_is_denied_without_commitment_content_leak(commitments):
+    memory, policy, db_path = commitments
+    secret = "UNKNOWN_AGENT_COMMITMENT_SECRET"
+    add(memory, scope="global", description=secret)
+    ghost = MemoryStore(db_path, policy, agent_id="ghost")
+    try:
+        listing = ghost.list_commitments(CommitmentListRequest(scope="global"))
+        create = ghost.add_commitment(create_request(scope="global"))
+    finally:
+        ghost.close()
+
+    assert listing.code == CommitmentResultCode.agent_unknown
+    assert listing.commitments == []
+    assert secret not in listing.model_dump_json()
+    assert create.code == CommitmentResultCode.agent_unknown
+
+
+def test_scope_denial_blocks_creation_and_manual_transition(commitments):
+    memory, policy, db_path = commitments
+    global_commitment = add(memory, scope="global")
+    restricted = policy.model_copy(update={
+        "agents": {
+            **policy.agents,
+            "restricted": AgentPermissions(
+                max_action_tier=RiskTier.irreversible,
+                allowed_scopes=["global"],
+                commitment_operations=[
+                    CommitmentOperation.create,
+                    CommitmentOperation.transition,
+                ],
+            ),
+        }
+    })
+    agent = MemoryStore(db_path, restricted, agent_id="restricted")
+    try:
+        create = agent.add_commitment(create_request(scope="project:banking"))
+        # It can see the global commitment but is not its managing principal.
+        manual = transition(agent, global_commitment.id, "waiting", scope="global")
+    finally:
+        agent.close()
+
+    assert create.code == CommitmentResultCode.scope_denied
+    assert manual.code == CommitmentResultCode.managing_agent_required
+
+
+def test_managing_agent_transition_scope_denial_does_not_leak_content(commitments):
+    memory, _, _ = commitments
+    secret = "TRANSITION_SCOPE_SECRET_MARKER"
+    commitment = add(
+        memory,
+        scope="project:hobby",
+        description=secret,
+        owner=secret,
+        beneficiary=secret,
+    )
+
+    result = transition(
+        memory, commitment.id, "waiting", scope="project:banking"
+    )
+
+    assert result.code == CommitmentResultCode.scope_denied
+    assert result.commitment is None
+    assert secret not in result.model_dump_json()
+
+
+def test_scan_is_scope_safe_and_does_not_mutate_unrelated_commitments(commitments):
+    memory, _, _ = commitments
+    banking = add(memory, scope="project:banking", description="Banking overdue")
+    hobby = add(memory, scope="project:hobby", description="HOBBY_SCAN_SECRET")
+
+    result = memory.surface_overdue(OverdueScanRequest(
+        scope="project:banking", as_of=DEADLINE + timedelta(days=1)
+    ))
+
+    assert [item.id for item in result.overdue] == [banking.id]
+    assert memory._store.get_commitment(banking.id).state == CommitmentState.overdue
+    assert memory._store.get_commitment(hobby.id).state == CommitmentState.open
+    assert "HOBBY_SCAN_SECRET" not in result.model_dump_json()
+
+
+def test_refund_within_five_days_scenario_surfaces_overdue(commitments):
+    memory, _, _ = commitments
+    refund = add(
+        memory,
+        description="Refund the customer within 5 days.",
+        owner="refund-operations",
+        beneficiary="customer_881",
+        created_at=CREATED,
+        deadline=CREATED + timedelta(days=5),
+    )
+
+    scan = memory.surface_overdue(OverdueScanRequest(
+        scope="project:support",
+        as_of=CREATED + timedelta(days=5, microseconds=1),
+    ))
+
+    assert [item.id for item in scan.overdue] == [refund.id]
+    assert scan.overdue[0].description == "Refund the customer within 5 days."
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("description", ""),
+        ("owner", "   "),
+        ("beneficiary", ""),
+        ("scope", "project:"),
+        ("scope", "project:bad scope"),
+        ("description", "x" * 4097),
+        ("owner", "x" * 257),
+        ("beneficiary", "x" * 257),
+    ],
+)
+def test_empty_and_malformed_commitment_fields_are_rejected(field, value):
+    raw = create_request().model_dump()
+    raw[field] = value
+    with pytest.raises(ValidationError):
+        CommitmentCreateRequest.model_validate(raw)
+
+
+def test_naive_dates_deadline_order_and_malformed_preconditions_are_rejected():
+    naive = CREATED.replace(tzinfo=None)
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        create_request(created_at=naive)
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        create_request(deadline=DEADLINE.replace(tzinfo=None))
+    with pytest.raises(ValidationError, match="must not be before"):
+        create_request(deadline=CREATED - timedelta(seconds=1))
+    with pytest.raises(ValidationError, match="must be unique"):
+        create_request(preconditions=[
+            CommitmentPrecondition(belief_id=1),
+            CommitmentPrecondition(belief_id=1),
+        ])
+    with pytest.raises(ValidationError):
+        CommitmentPrecondition.model_validate({"belief_id": 0})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CommitmentPrecondition.model_validate({"belief_id": 1, "script": "run()"})
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        OverdueScanRequest(scope="global", as_of=naive)
+
+
+def test_commitment_operation_policy_rejects_unknown_and_duplicate_entries():
+    policy = load_policy(POLICY_PATH)
+    raw = policy.model_dump(mode="json")
+    unknown = deepcopy(raw)
+    unknown["agents"]["support-agent"]["commitment_operations"].append("delete")
+    duplicate = deepcopy(raw)
+    duplicate["agents"]["support-agent"]["commitment_operations"].append("create")
+
+    with pytest.raises(ValidationError):
+        TrustPolicy.model_validate(unknown)
+    with pytest.raises(ValidationError, match="must be unique"):
+        TrustPolicy.model_validate(duplicate)
+
+
+def test_commitment_definition_and_creator_are_immutable_and_delete_is_blocked(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+
+    with pytest.raises(sqlite3.IntegrityError, match="definition is immutable"):
+        memory._store.conn.execute(
+            "UPDATE commitments SET created_by_agent_id = ? WHERE id = ?",
+            ("analytics-bot", commitment.id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="definition is immutable"):
+        memory._store.conn.execute(
+            "UPDATE commitments SET id = ? WHERE id = ?",
+            (commitment.id + 1000, commitment.id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="cancelled, never deleted"):
+        memory._store.conn.execute(
+            "DELETE FROM commitments WHERE id = ?", (commitment.id,)
+        )

@@ -11,13 +11,26 @@ from __future__ import annotations
 from typing import Optional
 
 from .assemble import assemble_context
+from .commitments import (
+    add_commitment as _add_commitment,
+    list_commitments as _list_commitments,
+    surface_overdue as _surface_overdue,
+    transition_commitment as _transition_commitment,
+)
 from .ingest import Extractor, ingest_event, live_extractor
 from .models import (
     AssembledContext,
     AssemblyRequest,
+    CommitmentCreateRequest,
+    CommitmentListRequest,
+    CommitmentListResult,
+    CommitmentMutationResult,
+    CommitmentTransitionRequest,
     GateDecision,
     GateResult,
     IngestResult,
+    OverdueScanRequest,
+    OverdueScanResult,
     PolicyReason,
     RetrievalRequest,
     RetrievalResult,
@@ -140,5 +153,44 @@ class MemoryStore:
     def explain(self, trace_id: int):
         raise NotImplementedError("explain lands in M7")
 
-    def add_commitment(self, **kwargs):
-        raise NotImplementedError("add_commitment lands in M5")
+    def add_commitment(
+        self, request: CommitmentCreateRequest
+    ) -> CommitmentMutationResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to add commitments "
+                "(pass policy=load_policy(...))"
+            )
+        return _add_commitment(self._store, self.policy, self.agent_id, request)
+
+    def transition_commitment(
+        self, request: CommitmentTransitionRequest
+    ) -> CommitmentMutationResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to transition commitments "
+                "(pass policy=load_policy(...))"
+            )
+        return _transition_commitment(
+            self._store, self.policy, self.agent_id, request
+        )
+
+    def list_commitments(
+        self, request: CommitmentListRequest
+    ) -> CommitmentListResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to list commitments "
+                "(pass policy=load_policy(...))"
+            )
+        return _list_commitments(self._store, self.policy, self.agent_id, request)
+
+    def surface_overdue(
+        self, request: OverdueScanRequest
+    ) -> OverdueScanResult:
+        if self.policy is None:
+            raise ValueError(
+                "MemoryStore requires a policy to scan overdue commitments "
+                "(pass policy=load_policy(...))"
+            )
+        return _surface_overdue(self._store, self.policy, self.agent_id, request)

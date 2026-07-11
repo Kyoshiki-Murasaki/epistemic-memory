@@ -35,11 +35,30 @@ def _fts_expression(tokens: list[str]) -> str | None:
     return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
 
 
-def _scope_allowed(scope: str, allowed_patterns: list[str]) -> bool:
+def scope_allowed(scope: str, allowed_patterns: list[str]) -> bool:
     if scope in allowed_patterns:
         return True
     parsed = Scope.parse(scope)
     return parsed.ref is not None and f"{parsed.kind}:*" in allowed_patterns
+
+
+def active_task_scopes(scope: str, task_type: str | None) -> list[str]:
+    """The M4 task boundary reused by all scoped public reads and mutations."""
+    return list(dict.fromkeys([
+        "global",
+        scope,
+        *([f"task_type:{task_type}"] if task_type else []),
+    ]))
+
+
+def authorized_task_scopes(
+    scope: str, task_type: str | None, allowed_patterns: list[str]
+) -> list[str]:
+    return [
+        candidate
+        for candidate in active_task_scopes(scope, task_type)
+        if scope_allowed(candidate, allowed_patterns)
+    ]
 
 
 def _recency_micros(raw: str) -> int:
@@ -130,14 +149,10 @@ def retrieve_beliefs(
             deduplications=[],
         )
 
-    active_scopes = list(dict.fromkeys([
-        "global",
-        request.scope,
-        *([f"task_type:{request.task_type}"] if request.task_type else []),
-    ]))
-    effective_scopes = [
-        scope for scope in active_scopes if _scope_allowed(scope, agent.allowed_scopes)
-    ]
+    active_scopes = active_task_scopes(request.scope, request.task_type)
+    effective_scopes = authorized_task_scopes(
+        request.scope, request.task_type, agent.allowed_scopes
+    )
     agent_denied_scopes = [
         scope for scope in active_scopes if scope not in effective_scopes
     ]

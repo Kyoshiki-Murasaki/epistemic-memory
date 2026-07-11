@@ -76,20 +76,55 @@ BEGIN
 END;
 
 -- ============================ commitments =================================
--- First-class promises/obligations. Operational state (not a belief); every
--- transition is written to audit_traces by the caller.
+-- First-class promises/obligations. Operational state (not a belief). M7 owns
+-- persistent audit traces; M5 records only the immutable managing principal.
 CREATE TABLE IF NOT EXISTS commitments (
-    id              INTEGER PRIMARY KEY,
-    description     TEXT NOT NULL,
-    owner           TEXT NOT NULL,
-    beneficiary     TEXT NOT NULL,
-    state           TEXT NOT NULL,
-    deadline        TEXT,
-    preconditions   TEXT,
-    proof_belief_id INTEGER REFERENCES beliefs(id),
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    id                    INTEGER PRIMARY KEY,
+    description           TEXT NOT NULL,
+    owner                 TEXT NOT NULL,
+    beneficiary           TEXT NOT NULL,
+    scope                 TEXT NOT NULL,
+    created_by_agent_id   TEXT NOT NULL,
+    state                 TEXT NOT NULL CHECK (
+        state IN ('open', 'waiting', 'fulfilled', 'cancelled', 'overdue')
+    ),
+    deadline              TEXT NOT NULL,
+    preconditions         TEXT NOT NULL,
+    proof_required        INTEGER NOT NULL CHECK (proof_required IN (0, 1)),
+    proof_reference       TEXT,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    CHECK (proof_reference IS NULL OR state = 'fulfilled'),
+    CHECK (state != 'fulfilled' OR proof_required = 0 OR proof_reference IS NOT NULL)
 );
+
+-- A transition may change only operational state, retained proof, and its
+-- timestamp. In particular, creator provenance and the domain owner are
+-- immutable and cannot be conflated or silently rewritten.
+CREATE TRIGGER IF NOT EXISTS commitments_definition_no_update
+BEFORE UPDATE ON commitments
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.description IS NOT OLD.description
+  OR NEW.owner IS NOT OLD.owner
+  OR NEW.beneficiary IS NOT OLD.beneficiary
+  OR NEW.scope IS NOT OLD.scope
+  OR NEW.created_by_agent_id IS NOT OLD.created_by_agent_id
+  OR NEW.deadline IS NOT OLD.deadline
+  OR NEW.preconditions IS NOT OLD.preconditions
+  OR NEW.proof_required IS NOT OLD.proof_required
+  OR NEW.created_at IS NOT OLD.created_at
+  OR (
+      OLD.proof_reference IS NOT NULL
+      AND NEW.proof_reference IS NOT OLD.proof_reference
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'commitment definition is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS commitments_no_delete BEFORE DELETE ON commitments
+BEGIN
+    SELECT RAISE(ABORT, 'commitments are cancelled, never deleted');
+END;
 
 -- ============================ artifacts + dependencies ====================
 -- Derived things a correction can invalidate, and the belief edges they rest on.

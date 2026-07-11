@@ -14,7 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .models import Belief, Event, Source
+from .models import (
+    Belief,
+    Commitment,
+    CommitmentCreateRequest,
+    CommitmentPrecondition,
+    CommitmentState,
+    Event,
+    Source,
+)
 
 
 def _now() -> str:
@@ -36,6 +44,27 @@ def _row_to_belief(row: sqlite3.Row, *, is_current: bool) -> Belief:
         valid_from=row["valid_from"],
         created_at=row["created_at"],
         is_current=is_current,
+    )
+
+
+def _row_to_commitment(row: sqlite3.Row) -> Commitment:
+    return Commitment(
+        id=row["id"],
+        description=row["description"],
+        owner=row["owner"],
+        beneficiary=row["beneficiary"],
+        scope=row["scope"],
+        created_by_agent_id=row["created_by_agent_id"],
+        state=row["state"],
+        deadline=row["deadline"],
+        preconditions=[
+            CommitmentPrecondition.model_validate(value)
+            for value in json.loads(row["preconditions"])
+        ],
+        proof_required=bool(row["proof_required"]),
+        proof_reference=row["proof_reference"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -301,3 +330,132 @@ class Store:
             current = self.get_belief(current.supersedes_id) if current.supersedes_id else None
         chain.reverse()
         return chain
+
+    # ----------------------------- commitments ----------------------------
+
+    def add_commitment(
+        self, request: CommitmentCreateRequest, *, created_by_agent_id: str
+    ) -> Commitment:
+        if request.scope is None:
+            raise ValueError("commitment scope is required")
+        preconditions = json.dumps(
+            [value.model_dump(mode="json") for value in request.preconditions],
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        created_at = request.created_at.isoformat()
+        cur = self.conn.execute(
+            "INSERT INTO commitments (description, owner, beneficiary, scope, "
+            "created_by_agent_id, state, deadline, preconditions, proof_required, "
+            "proof_reference, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.description,
+                request.owner,
+                request.beneficiary,
+                request.scope,
+                created_by_agent_id,
+                CommitmentState.open.value,
+                request.deadline.isoformat(),
+                preconditions,
+                int(request.proof_required),
+                None,
+                created_at,
+                created_at,
+            ),
+        )
+        self.conn.commit()
+        stored = self.get_commitment(int(cur.lastrowid))
+        if stored is None:
+            raise RuntimeError("inserted commitment could not be reloaded")
+        return stored
+
+    def get_commitment(self, commitment_id: int) -> Optional[Commitment]:
+        row = self.conn.execute(
+            "SELECT * FROM commitments WHERE id = ?", (commitment_id,)
+        ).fetchone()
+        return _row_to_commitment(row) if row is not None else None
+
+    def list_commitments(
+        self,
+        *,
+        scopes: Optional[list[str]] = None,
+        invert_scopes: bool = False,
+        states: Optional[list[CommitmentState]] = None,
+    ) -> list[Commitment]:
+        conditions: list[str] = []
+        params: list[object] = []
+        if scopes is not None:
+            if not scopes:
+                if not invert_scopes:
+                    conditions.append("0")
+            else:
+                placeholders = ", ".join("?" for _ in scopes)
+                operator = "NOT IN" if invert_scopes else "IN"
+                conditions.append(f"scope {operator} ({placeholders})")
+                params.extend(scopes)
+        if states is not None:
+            if not states:
+                conditions.append("0")
+            else:
+                placeholders = ", ".join("?" for _ in states)
+                conditions.append(f"state IN ({placeholders})")
+                params.extend(state.value for state in states)
+        where = " AND ".join(conditions) if conditions else "1"
+        rows = self.conn.execute(
+            f"SELECT * FROM commitments WHERE {where} "
+            "ORDER BY deadline, created_at, id",
+            params,
+        ).fetchall()
+        return [_row_to_commitment(row) for row in rows]
+
+    def count_commitments(
+        self, *, scopes: Optional[list[str]], invert_scopes: bool = False
+    ) -> int:
+        if scopes is None:
+            row = self.conn.execute("SELECT COUNT(*) AS count FROM commitments").fetchone()
+            return int(row["count"])
+        if not scopes:
+            if invert_scopes:
+                row = self.conn.execute(
+                    "SELECT COUNT(*) AS count FROM commitments"
+                ).fetchone()
+                return int(row["count"])
+            return 0
+        placeholders = ", ".join("?" for _ in scopes)
+        operator = "NOT IN" if invert_scopes else "IN"
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS count FROM commitments "
+            f"WHERE scope {operator} ({placeholders})",
+            scopes,
+        ).fetchone()
+        return int(row["count"])
+
+    def update_commitment_state(
+        self,
+        commitment_id: int,
+        *,
+        expected_state: CommitmentState,
+        target_state: CommitmentState,
+        updated_at: datetime,
+        proof_reference: Optional[str],
+    ) -> Commitment:
+        cur = self.conn.execute(
+            "UPDATE commitments SET state = ?, proof_reference = ?, updated_at = ? "
+            "WHERE id = ? AND state = ?",
+            (
+                target_state.value,
+                proof_reference,
+                updated_at.isoformat(),
+                commitment_id,
+                expected_state.value,
+            ),
+        )
+        if cur.rowcount != 1:
+            self.conn.rollback()
+            raise RuntimeError("commitment state changed during transition")
+        self.conn.commit()
+        stored = self.get_commitment(commitment_id)
+        if stored is None:
+            raise RuntimeError("transitioned commitment could not be reloaded")
+        return stored
