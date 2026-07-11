@@ -61,6 +61,7 @@ def m6(tmp_path):
         db_path, policy, agent_id="support-agent", clock=clock
     )
     for source_id, source_type in [
+        ("support-agent", "agent_inference"),
         ("user", "user"),
         ("billing", "billing_system"),
     ]:
@@ -79,9 +80,9 @@ def belief(memory: MemoryStore, **overrides) -> Belief:
         "entity": "order_4411",
         "attribute": "payment_status",
         "value": "paid",
-        "status": EpistemicStatus.user_stated,
+        "status": EpistemicStatus.ai_inferred,
         "scope": "global",
-        "source_id": "user",
+        "source_id": "support-agent",
         "decision_type": "payment_status",
         "valid_from": NOW.isoformat(),
         "created_at": NOW.isoformat(),
@@ -95,10 +96,10 @@ def ingest_belief(memory: MemoryStore, **overrides) -> Belief:
         "entity": "order_4411",
         "attribute": "payment_status",
         "value": "paid",
-        "proposed_status": EpistemicStatus.user_stated,
+        "proposed_status": EpistemicStatus.ai_inferred,
         "scope": "global",
         "decision_type": "payment_status",
-        "source_id": "user",
+        "source_id": "support-agent",
         "content": "I paid",
     }
     values.update(overrides)
@@ -158,21 +159,39 @@ def correction(
     memory: MemoryStore,
     belief_id: int,
     *,
-    source_id: str = "user",
     scope: str | None = "global",
     value: str | None = "unpaid",
-    proposed_status: EpistemicStatus | None = EpistemicStatus.user_stated,
+    proposed_status: EpistemicStatus | None = EpistemicStatus.ai_inferred,
     kind: CorrectionKind = CorrectionKind.correction,
 ):
     return memory.correct(CorrectionRequest(
         belief_id=belief_id,
         kind=kind,
-        source_id=source_id,
         content="Correction received",
         scope=scope,
         value=value,
         proposed_status=proposed_status,
     ))
+
+
+def persisted_m6_state(memory: MemoryStore) -> dict[str, list[tuple]]:
+    return {
+        "events": [tuple(row) for row in memory._store.conn.execute(
+            "SELECT * FROM events ORDER BY id"
+        )],
+        "beliefs": [tuple(row) for row in memory._store.conn.execute(
+            "SELECT * FROM beliefs ORDER BY id"
+        )],
+        "fts": [tuple(row) for row in memory._store.conn.execute(
+            "SELECT rowid, entity, attribute, value FROM beliefs_fts ORDER BY rowid"
+        )],
+        "dependencies": [tuple(row) for row in memory._store.conn.execute(
+            "SELECT * FROM dependencies ORDER BY id"
+        )],
+        "artifacts": [tuple(row) for row in memory._store.conn.execute(
+            "SELECT * FROM artifacts ORDER BY id"
+        )],
+    }
 
 
 def test_register_artifacts_preserves_kind_execution_and_clock(m6):
@@ -335,6 +354,199 @@ def test_global_upstream_may_support_narrower_artifact(m6):
     assert result.ok is True
 
 
+def test_superseded_belief_cannot_be_registered_as_a_new_dependency(m6):
+    memory, _, _, _ = m6
+    old = belief(memory)
+    assert correction(memory, old.id).ok
+    downstream = artifact(memory, label="New output")
+    before_artifacts = [item.model_dump() for item in memory._store.list_artifacts()]
+
+    result = dependency(
+        memory, DependencyEndpointKind.belief, old.id, downstream.id
+    )
+
+    assert result.code == M6ResultCode.dependency_belief_invalid_state
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+    assert [item.model_dump() for item in memory._store.list_artifacts()] == before_artifacts
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        EpistemicStatus.disputed,
+        EpistemicStatus.retracted,
+        EpistemicStatus.do_not_use,
+    ],
+)
+def test_current_unusable_belief_cannot_be_registered_as_dependency(m6, status):
+    memory, _, _, _ = m6
+    upstream = belief(memory, status=status)
+    downstream = artifact(memory, label=f"Output for {status.value}")
+    before_artifacts = [item.model_dump() for item in memory._store.list_artifacts()]
+
+    result = dependency(
+        memory, DependencyEndpointKind.belief, upstream.id, downstream.id
+    )
+
+    assert result.code == M6ResultCode.dependency_belief_invalid_state
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+    assert [item.model_dump() for item in memory._store.list_artifacts()] == before_artifacts
+
+
+def test_belief_with_unknown_or_over_ceiling_provenance_cannot_be_dependency(m6):
+    memory, _, _, _ = m6
+    memory._store.add_source(Source(
+        id="unknown-provenance",
+        type="unconfigured_type",
+        label="unknown",
+        created_at=NOW.isoformat(),
+    ))
+    unknown = belief(memory, source_id="unknown-provenance")
+    over_ceiling = belief(
+        memory,
+        source_id="user",
+        status=EpistemicStatus.system_verified,
+        attribute="credit_owed",
+        decision_type="credit_owed",
+    )
+    first = artifact(memory, label="Unknown provenance output")
+    second = artifact(memory, label="Over-ceiling output")
+
+    unknown_result = dependency(
+        memory, DependencyEndpointKind.belief, unknown.id, first.id
+    )
+    ceiling_result = dependency(
+        memory, DependencyEndpointKind.belief, over_ceiling.id, second.id
+    )
+
+    assert unknown_result.code == M6ResultCode.dependency_belief_invalid_provenance
+    assert ceiling_result.code == M6ResultCode.dependency_belief_invalid_provenance
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+
+
+def test_belief_with_missing_source_row_cannot_be_dependency(m6):
+    memory, _, _, _ = m6
+    memory._store.conn.execute("PRAGMA foreign_keys = OFF")
+    cur = memory._store.conn.execute(
+        "INSERT INTO beliefs (entity, attribute, value, status, scope, source_id, "
+        "event_id, supersedes_id, decision_type, valid_from, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy",
+            "signal",
+            "orphaned provenance",
+            EpistemicStatus.ai_inferred.value,
+            "global",
+            "missing-source",
+            None,
+            None,
+            None,
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    memory._store.conn.commit()
+    memory._store.conn.execute("PRAGMA foreign_keys = ON")
+    downstream = artifact(memory, label="Orphan output")
+
+    result = dependency(
+        memory, DependencyEndpointKind.belief, int(cur.lastrowid), downstream.id
+    )
+
+    assert result.code == M6ResultCode.dependency_belief_invalid_provenance
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "execution_state", "propagation_state"),
+    [
+        (
+            ArtifactKind.output,
+            ArtifactExecutionState.not_applicable,
+            ArtifactPropagationState.stale,
+        ),
+        (
+            ArtifactKind.action,
+            ArtifactExecutionState.pending,
+            ArtifactPropagationState.halted,
+        ),
+        (
+            ArtifactKind.action,
+            ArtifactExecutionState.executed,
+            ArtifactPropagationState.review_required,
+        ),
+    ],
+)
+def test_invalid_artifact_cannot_be_registered_as_upstream(
+    m6, kind, execution_state, propagation_state
+):
+    memory, _, _, _ = m6
+    upstream = artifact(
+        memory,
+        label=f"Invalid {propagation_state.value} upstream",
+        kind=kind,
+        execution_state=execution_state,
+    )
+    memory._store.set_artifact_propagation_state(
+        upstream.id, state=propagation_state, updated_at=NOW
+    )
+    downstream = artifact(memory, label="Current downstream")
+    before = [item.model_dump() for item in memory._store.list_artifacts()]
+
+    result = dependency(
+        memory, DependencyEndpointKind.artifact, upstream.id, downstream.id
+    )
+
+    assert result.code == M6ResultCode.dependency_artifact_upstream_invalid_state
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+    assert [item.model_dump() for item in memory._store.list_artifacts()] == before
+
+
+@pytest.mark.parametrize(
+    ("kind", "execution_state", "propagation_state"),
+    [
+        (
+            ArtifactKind.output,
+            ArtifactExecutionState.not_applicable,
+            ArtifactPropagationState.stale,
+        ),
+        (
+            ArtifactKind.action,
+            ArtifactExecutionState.pending,
+            ArtifactPropagationState.halted,
+        ),
+        (
+            ArtifactKind.action,
+            ArtifactExecutionState.executed,
+            ArtifactPropagationState.review_required,
+        ),
+    ],
+)
+def test_dependency_cannot_be_added_to_invalid_downstream_artifact(
+    m6, kind, execution_state, propagation_state
+):
+    memory, _, _, _ = m6
+    upstream = belief(memory)
+    downstream = artifact(
+        memory,
+        label=f"Invalid {propagation_state.value} downstream",
+        kind=kind,
+        execution_state=execution_state,
+    )
+    memory._store.set_artifact_propagation_state(
+        downstream.id, state=propagation_state, updated_at=NOW
+    )
+    before = [item.model_dump() for item in memory._store.list_artifacts()]
+
+    result = dependency(
+        memory, DependencyEndpointKind.belief, upstream.id, downstream.id
+    )
+
+    assert result.code == M6ResultCode.dependency_artifact_downstream_invalid_state
+    assert memory._store.conn.execute("SELECT COUNT(*) FROM dependencies").fetchone()[0] == 0
+    assert [item.model_dump() for item in memory._store.list_artifacts()] == before
+
+
 def test_correction_appends_event_and_belief_without_mutating_history_and_clamps(m6):
     memory, _, _, clock = m6
     original = ingest_belief(memory)
@@ -358,7 +570,7 @@ def test_correction_appends_event_and_belief_without_mutating_history_and_clamps
     assert result.ok is True
     assert result.code == M6ResultCode.correction_applied
     assert result.belief.supersedes_id == original.id
-    assert result.belief.status == EpistemicStatus.user_stated
+    assert result.belief.status == EpistemicStatus.ai_inferred
     assert result.event.source_id == result.belief.source_id == original.source_id
     assert memory._store.is_current(original.id) is False
     assert memory._store.is_current(result.belief.id) is True
@@ -399,7 +611,16 @@ def test_cross_source_correction_is_denied_and_disagreement_uses_conflict_path(m
     memory, _, _, _ = m6
     original = ingest_belief(memory)
 
-    denied = correction(memory, original.id, source_id="billing")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CorrectionRequest.model_validate({
+            "belief_id": original.id,
+            "kind": "correction",
+            "source_id": "billing",
+            "content": "forged provenance",
+            "scope": "global",
+            "value": "FAILED",
+            "proposed_status": "system_verified",
+        })
     billing = ingest_belief(
         memory,
         source_id="billing",
@@ -409,11 +630,104 @@ def test_cross_source_correction_is_denied_and_disagreement_uses_conflict_path(m
     )
     current = memory._store.current_beliefs(original.entity, original.attribute)
 
-    assert denied.code == M6ResultCode.source_mismatch
-    assert denied.belief is None
     assert {item.id for item in current} == {original.id, billing.id}
     assert {item.value for item in current} == {"paid", "FAILED"}
     assert all(item.supersedes_id is None for item in current)
+
+
+@pytest.mark.parametrize(
+    ("source_id", "source_status"),
+    [
+        ("user", EpistemicStatus.user_stated),
+        ("billing", EpistemicStatus.system_verified),
+    ],
+)
+def test_readable_source_without_exact_write_authority_is_denied_before_writes(
+    m6, monkeypatch, source_id, source_status
+):
+    memory, _, _, _ = m6
+    secret = f"SECRET_{source_id.upper()}_BELIEF_CONTENT"
+    target = belief(
+        memory,
+        value=secret,
+        source_id=source_id,
+        status=source_status,
+    )
+    dependent = artifact(memory, label=f"{source_id} dependent")
+    assert dependency(
+        memory, DependencyEndpointKind.belief, target.id, dependent.id
+    ).ok
+    before = persisted_m6_state(memory)
+    ingest_called = False
+
+    def forbidden_ingest(*args, **kwargs):
+        nonlocal ingest_called
+        ingest_called = True
+        raise AssertionError("ingest must not run before source authorization")
+
+    monkeypatch.setattr(
+        "epistemic_memory.propagate.ingest_event", forbidden_ingest
+    )
+    result = memory.correct(CorrectionRequest(
+        belief_id=target.id,
+        kind=CorrectionKind.correction,
+        content="unauthorized provenance attempt",
+        scope="global",
+        value="forged replacement",
+        proposed_status=EpistemicStatus.system_verified,
+    ))
+
+    assert result.code == M6ResultCode.source_write_not_permitted
+    assert result.belief is None
+    assert result.event is None
+    assert ingest_called is False
+    assert persisted_m6_state(memory) == before
+    assert memory._store.get_artifact(dependent.id).propagation_state == (
+        ArtifactPropagationState.current
+    )
+    serialized = result.model_dump_json()
+    assert secret not in serialized
+    assert source_id not in serialized
+
+
+def test_authorized_source_id_must_match_its_policy_bound_runtime_type(tmp_path):
+    policy = load_policy(POLICY_PATH)
+    memory = MemoryStore(
+        str(tmp_path / "wrong-source-type.db"),
+        policy,
+        agent_id="support-agent",
+        clock=FakeClock(NOW),
+    )
+    try:
+        memory._store.add_source(Source(
+            id="support-agent",
+            type="billing_system",
+            label="misregistered principal",
+            created_at=NOW.isoformat(),
+        ))
+        target = memory._store.add_belief(Belief(
+            entity="order_4411",
+            attribute="payment_status",
+            value="paid",
+            status=EpistemicStatus.system_verified,
+            scope="global",
+            source_id="support-agent",
+            decision_type="payment_status",
+            valid_from=NOW.isoformat(),
+            created_at=NOW.isoformat(),
+        ))
+        result = memory.correct(CorrectionRequest(
+            belief_id=target.id,
+            kind=CorrectionKind.correction,
+            content="attempt strong correction",
+            scope="global",
+            value="refunded",
+            proposed_status=EpistemicStatus.system_verified,
+        ))
+    finally:
+        memory.close()
+
+    assert result.code == M6ResultCode.source_write_not_permitted
 
 
 def test_non_current_target_and_semantically_invalid_requests_fail_deterministically(m6):
@@ -438,6 +752,96 @@ def test_non_current_target_and_semantically_invalid_requests_fail_deterministic
     assert repeated.code == M6ResultCode.target_belief_not_current
     assert missing_value.code == M6ResultCode.invalid_correction
     assert invalid_retraction.code == M6ResultCode.invalid_correction
+
+
+@pytest.mark.parametrize(
+    "target_status",
+    [
+        EpistemicStatus.disputed,
+        EpistemicStatus.retracted,
+        EpistemicStatus.do_not_use,
+    ],
+)
+def test_authorized_current_unusable_belief_can_receive_valid_replacement(
+    m6, target_status
+):
+    memory, _, _, _ = m6
+    target = ingest_belief(
+        memory,
+        proposed_status=target_status,
+        value=f"old-{target_status.value}",
+        content=f"original {target_status.value} event",
+    )
+    event_before = tuple(memory._store.conn.execute(
+        "SELECT * FROM events WHERE id = ?", (target.event_id,)
+    ).fetchone())
+    stored_before = tuple(memory._store.conn.execute(
+        "SELECT * FROM beliefs WHERE id = ?", (target.id,)
+    ).fetchone())
+
+    result = correction(
+        memory,
+        target.id,
+        value="new supported value",
+        proposed_status=EpistemicStatus.system_verified,
+    )
+
+    assert result.ok is True
+    assert result.belief.supersedes_id == target.id
+    assert result.belief.status == EpistemicStatus.ai_inferred
+    assert memory._store.is_current(target.id) is False
+    assert memory._store.is_current(result.belief.id) is True
+    assert tuple(memory._store.conn.execute(
+        "SELECT * FROM beliefs WHERE id = ?", (target.id,)
+    ).fetchone()) == stored_before
+    assert tuple(memory._store.conn.execute(
+        "SELECT * FROM events WHERE id = ?", (target.event_id,)
+    ).fetchone()) == event_before
+
+
+def test_repeating_identical_retraction_is_rejected_as_semantic_noop(m6):
+    memory, _, _, _ = m6
+    target = belief(memory, status=EpistemicStatus.retracted)
+    before = persisted_m6_state(memory)
+
+    result = correction(
+        memory,
+        target.id,
+        kind=CorrectionKind.retraction,
+        value=None,
+        proposed_status=None,
+    )
+
+    assert result.code == M6ResultCode.invalid_correction
+    assert persisted_m6_state(memory) == before
+
+
+def test_authorized_correction_of_unusable_target_still_propagates_legacy_edges(m6):
+    memory, _, _, _ = m6
+    target = belief(memory, status=EpistemicStatus.disputed)
+    output = artifact(memory, label="Legacy disputed output")
+    memory._store.add_dependency(
+        DependencyEndpointKind.belief,
+        target.id,
+        output.id,
+        created_by_agent_id="legacy",
+        created_at=NOW,
+    )
+
+    result = correction(memory, target.id)
+    repeated, hidden_count, affected_count = apply_propagation(
+        memory._store,
+        target.id,
+        visible_scopes=["global"],
+        as_of=NOW + timedelta(hours=1),
+    )
+
+    assert result.ok is True
+    assert result.visible_impacts[0].artifact.propagation_state == ArtifactPropagationState.stale
+    assert repeated[0].artifact.id == output.id
+    assert repeated[0].state_changed is False
+    assert hidden_count == 0
+    assert affected_count == 1
 
 
 def test_missing_and_out_of_task_targets_fail_with_structured_codes(m6):
@@ -617,11 +1021,10 @@ def test_hidden_scope_artifact_is_halted_without_serialized_nonaggregate_leak(m6
     result = memory.correct(CorrectionRequest(
         belief_id=upstream.id,
         kind=CorrectionKind.correction,
-        source_id="user",
         content="global correction",
         scope="project:banking",
         value="unpaid",
-        proposed_status=EpistemicStatus.user_stated,
+        proposed_status=EpistemicStatus.ai_inferred,
     ))
     serialized = result.model_dump_json()
 
@@ -715,11 +1118,10 @@ def test_unauthorized_agents_cannot_mutate_m6_state_without_content_leak(m6, age
         corrected = other.correct(CorrectionRequest(
             belief_id=upstream.id,
             kind=CorrectionKind.correction,
-            source_id="user",
             content="denied correction",
             scope="global",
             value="unpaid",
-            proposed_status=EpistemicStatus.user_stated,
+            proposed_status=EpistemicStatus.ai_inferred,
         ))
     finally:
         other.close()
@@ -750,6 +1152,34 @@ def test_policy_rejects_unknown_and_duplicate_memory_operations():
         TrustPolicy.model_validate(duplicate)
 
 
+def test_policy_rejects_unknown_empty_duplicate_or_wildcard_writable_sources():
+    policy = load_policy(POLICY_PATH)
+    raw = policy.model_dump(mode="json")
+    unknown = deepcopy(raw)
+    unknown["agents"]["support-agent"]["writable_source_ids"].append("billing")
+    empty = deepcopy(raw)
+    empty["agents"]["support-agent"]["writable_source_ids"].append("")
+    duplicate = deepcopy(raw)
+    duplicate["agents"]["support-agent"]["writable_source_ids"].append(
+        "support-agent"
+    )
+    wildcard = deepcopy(raw)
+    wildcard["agents"]["support-agent"]["writable_source_ids"] = ["billing:*"]
+    unknown_type = deepcopy(raw)
+    unknown_type["source_principals"]["support-copy"] = "unknown-source-type"
+
+    with pytest.raises(ValidationError, match="unknown writable source IDs"):
+        TrustPolicy.model_validate(unknown)
+    with pytest.raises(ValidationError):
+        TrustPolicy.model_validate(empty)
+    with pytest.raises(ValidationError, match="must be unique"):
+        TrustPolicy.model_validate(duplicate)
+    with pytest.raises(ValidationError, match="exact source IDs"):
+        TrustPolicy.model_validate(wildcard)
+    with pytest.raises(ValidationError, match="unknown source type"):
+        TrustPolicy.model_validate(unknown_type)
+
+
 def test_public_m6_requests_forbid_agent_and_authoritative_timestamps():
     requests = [
         (
@@ -775,16 +1205,18 @@ def test_public_m6_requests_forbid_agent_and_authoritative_timestamps():
             {
                 "belief_id": 1,
                 "kind": "correction",
-                "source_id": "user",
                 "content": "correct",
                 "scope": "global",
                 "value": "new",
-                "proposed_status": "user_stated",
+                "proposed_status": "ai_inferred",
             },
         ),
     ]
     for model, values in requests:
-        for field in ("agent_id", "created_at", "updated_at", "as_of"):
+        forbidden = ["agent_id", "created_at", "updated_at", "as_of"]
+        if model is CorrectionRequest:
+            forbidden.append("source_id")
+        for field in forbidden:
             with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
                 model.model_validate({**values, field: NOW})
 

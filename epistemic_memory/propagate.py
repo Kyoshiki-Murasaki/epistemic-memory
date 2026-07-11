@@ -14,6 +14,7 @@ from .models import (
     ArtifactPropagationState,
     ArtifactRegistrationRequest,
     ArtifactRegistrationResult,
+    Belief,
     CandidateBelief,
     CorrectionKind,
     CorrectionRequest,
@@ -27,6 +28,7 @@ from .models import (
     MemoryOperation,
     TrustPolicy,
 )
+from .policy import clamp_status
 from .retrieve import authorized_task_scopes, scope_allowed
 from .store import Store
 
@@ -108,6 +110,34 @@ def _would_create_cycle(store: Store, upstream_id: int, downstream_id: int) -> b
     return False
 
 
+def _belief_dependency_problem(
+    store: Store, policy: TrustPolicy, belief: Belief
+) -> tuple[M6ResultCode, str] | None:
+    unusable = {
+        EpistemicStatus.disputed,
+        EpistemicStatus.superseded,
+        EpistemicStatus.retracted,
+        EpistemicStatus.do_not_use,
+    }
+    if belief.is_current is not True or belief.status in unusable:
+        return (
+            M6ResultCode.dependency_belief_invalid_state,
+            "belief upstream is not current and usable",
+        )
+    source = store.get_source(belief.source_id)
+    if source is None or source.type not in policy.source_status_ceiling:
+        return (
+            M6ResultCode.dependency_belief_invalid_provenance,
+            "belief upstream lacks configured provenance",
+        )
+    if clamp_status(belief.status, source.type, policy) != belief.status:
+        return (
+            M6ResultCode.dependency_belief_invalid_provenance,
+            "belief upstream status exceeds source authority",
+        )
+    return None
+
+
 def register_dependency(
     store: Store,
     policy: TrustPolicy,
@@ -170,6 +200,20 @@ def register_dependency(
         return _dependency_failure(
             M6ResultCode.scope_denied,
             "one or more endpoints are outside the active task scope",
+        )
+    if downstream.propagation_state != ArtifactPropagationState.current:
+        return _dependency_failure(
+            M6ResultCode.dependency_artifact_downstream_invalid_state,
+            "downstream artifact is not current",
+        )
+    if request.upstream_kind == DependencyEndpointKind.belief:
+        problem = _belief_dependency_problem(store, policy, upstream)
+        if problem is not None:
+            return _dependency_failure(*problem)
+    elif upstream.propagation_state != ArtifactPropagationState.current:
+        return _dependency_failure(
+            M6ResultCode.dependency_artifact_upstream_invalid_state,
+            "upstream artifact is not current",
         )
     existing = store.get_dependency(
         request.upstream_kind,
@@ -316,10 +360,17 @@ def correct_belief(
             "target belief is outside the authorized active task scope",
             as_of,
         )
-    if request.source_id != target.source_id:
+    expected_source_type = policy.source_principals.get(target.source_id)
+    target_source = store.get_source(target.source_id)
+    if (
+        target.source_id not in agent.writable_source_ids
+        or expected_source_type is None
+        or target_source is None
+        or target_source.type != expected_source_type
+    ):
         return _correction_failure(
-            M6ResultCode.source_mismatch,
-            "cross-source correction cannot supersede a belief",
+            M6ResultCode.source_write_not_permitted,
+            "agent is not authorized to write for the target provenance source",
             as_of,
         )
     if target.is_current is not True:
@@ -328,17 +379,11 @@ def correct_belief(
             "target belief is not structurally current",
             as_of,
         )
-    dead = {
+    invalid_replacement_statuses = {
         EpistemicStatus.superseded,
         EpistemicStatus.retracted,
         EpistemicStatus.do_not_use,
     }
-    if target.status in dead:
-        return _correction_failure(
-            M6ResultCode.invalid_correction,
-            "an unusable belief cannot be corrected or retracted again",
-            as_of,
-        )
     if request.kind == CorrectionKind.correction:
         if request.value is None or request.proposed_status is None:
             return _correction_failure(
@@ -346,7 +391,7 @@ def correct_belief(
                 "correction requires a replacement value and proposed status",
                 as_of,
             )
-        if request.proposed_status in dead:
+        if request.proposed_status in invalid_replacement_statuses:
             return _correction_failure(
                 M6ResultCode.invalid_correction,
                 "correction proposed status must remain usable",
@@ -361,6 +406,12 @@ def correct_belief(
                 "retraction does not accept a replacement value or proposed status",
                 as_of,
             )
+        if target.status == EpistemicStatus.retracted:
+            return _correction_failure(
+                M6ResultCode.invalid_correction,
+                "repeating an identical current retraction is not a new correction",
+                as_of,
+            )
         value = target.value
         proposed_status = EpistemicStatus.retracted
 
@@ -373,7 +424,7 @@ def correct_belief(
         decision_type=target.decision_type,
     )
 
-    def extractor(event, source_type):
+    def extractor(_event, _source_type):
         return [candidate]
 
     try:
@@ -381,7 +432,7 @@ def correct_belief(
             ingested = ingest_event(
                 store,
                 policy,
-                source_id=request.source_id,
+                source_id=target.source_id,
                 content=request.content,
                 scope=target.scope,
                 meta={

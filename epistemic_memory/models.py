@@ -97,9 +97,18 @@ class M6ResultCode(str, Enum):
     target_belief_not_found = "target_belief_not_found"
     target_belief_not_current = "target_belief_not_current"
     source_mismatch = "source_mismatch"
+    source_write_not_permitted = "source_write_not_permitted"
     invalid_correction = "invalid_correction"
     artifact_not_found = "artifact_not_found"
     dependency_endpoint_not_found = "dependency_endpoint_not_found"
+    dependency_belief_invalid_state = "dependency_belief_invalid_state"
+    dependency_belief_invalid_provenance = "dependency_belief_invalid_provenance"
+    dependency_artifact_upstream_invalid_state = (
+        "dependency_artifact_upstream_invalid_state"
+    )
+    dependency_artifact_downstream_invalid_state = (
+        "dependency_artifact_downstream_invalid_state"
+    )
     dependency_scope_incompatible = "dependency_scope_incompatible"
     dependency_self_edge = "dependency_self_edge"
     dependency_duplicate = "dependency_duplicate"
@@ -546,14 +555,13 @@ class CorrectionRequest(BaseModel):
 
     belief_id: int = Field(gt=0)
     kind: CorrectionKind
-    source_id: str
     content: str = Field(min_length=1, max_length=4096)
     scope: Optional[str]
     task_type: Optional[str] = None
     value: Optional[str] = None
     proposed_status: Optional[EpistemicStatus] = None
 
-    @field_validator("source_id", "content")
+    @field_validator("content")
     @classmethod
     def validate_text(cls, value: str, info) -> str:
         return _nonempty(value, info.field_name)
@@ -693,6 +701,7 @@ class AgentPermissions(_PolicyModel):
     allowed_scopes: list[str]
     commitment_operations: list[CommitmentOperation] = Field(default_factory=list)
     memory_operations: list[MemoryOperation] = Field(default_factory=list)
+    writable_source_ids: list[str] = Field(default_factory=list)
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -725,11 +734,23 @@ class AgentPermissions(_PolicyModel):
             raise ValueError("memory_operations entries must be unique")
         return values
 
+    @field_validator("writable_source_ids")
+    @classmethod
+    def validate_writable_source_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("writable_source_ids entries must be unique")
+        for value in values:
+            _nonempty(value, "writable_source_ids entry")
+            if "*" in value:
+                raise ValueError("writable_source_ids entries must be exact source IDs")
+        return values
+
 
 class TrustPolicy(_PolicyModel):
     version: int
     status_strength: dict[str, int]
     source_status_ceiling: dict[str, EpistemicStatus]
+    source_principals: dict[str, str] = Field(default_factory=dict)
     trust_matrix: dict[str, TrustRule]
     risk_tiers: list[RiskTier]
     gate_rules: dict[RiskTier, GateRule]
@@ -766,6 +787,23 @@ class TrustPolicy(_PolicyModel):
             raise ValueError("gate_rules must define exactly one rule for every risk tier")
 
         configured_sources = set(self.source_status_ceiling)
+        for source_id, source_type in self.source_principals.items():
+            _nonempty(source_id, "source principal ID")
+            if "*" in source_id:
+                raise ValueError("source principal IDs must be exact")
+            if source_type not in configured_sources:
+                raise ValueError(
+                    f"source principal {source_id!r} references unknown source type "
+                    f"{source_type!r}"
+                )
+        known_source_ids = set(self.source_principals)
+        for agent_id, permissions in self.agents.items():
+            unknown_source_ids = set(permissions.writable_source_ids) - known_source_ids
+            if unknown_source_ids:
+                raise ValueError(
+                    f"agent {agent_id!r} references unknown writable source IDs: "
+                    f"{sorted(unknown_source_ids)}"
+                )
         for decision_type, rule in self.trust_matrix.items():
             _nonempty(decision_type, "decision_type")
             unknown_sources = set(rule.ranking) - configured_sources

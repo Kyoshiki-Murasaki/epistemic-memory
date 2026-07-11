@@ -1,6 +1,6 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M6 complete (172 tests passing). M6 adds explicit correction and
+Status: **M0–M6 complete and provenance-authority-audited (193 tests passing). M6 adds explicit correction and
 graph-mutation authority, typed scoped artifacts, a deterministic dependency
 DAG, and atomic hidden-scope-safe correction propagation.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
@@ -72,6 +72,9 @@ minimal schema consequences:
   it through reads/gates. No `agents` table.
 - **Per-agent permissions live in `trust_policy.yaml` as DATA** (a new `agents:` section, added in
   M3), evaluated by the same pure functions as the trust matrix — consistent with "policy is data."
+- **Correction provenance is exact-source authorized.** `CorrectionRequest` cannot select a
+  source. Each agent has explicit `writable_source_ids`, validated against policy-declared
+  source principals whose expected runtime source type is also bound in policy.
 - **One new column:** `audit_traces.agent_id`, so every assembly/gate/action is attributable to the
   agent that caused it (needed for the M8/M9 multi-agent tests and MemGov-Bench dimension 5).
 - **MemGov-Bench (M11) needs no schema at all** — it's a harness driving the existing core API
@@ -453,9 +456,12 @@ class MemoryStore:
   and executed actions remain executed but require review. Correction creation and every
   reachable artifact update share one SQLite transaction and one store-clock sample. Safety
   propagation crosses response-visibility boundaries while the typed result exposes hidden
-  effects only as safe counts/rule codes.
-  → verified: `.venv/bin/python -m pytest -vv tests/test_propagation.py` — **30 passed**;
-  full suite — **172 passed**.
+  effects only as safe counts/rule codes. The M6 security audit removes caller-selected source
+  identity, requires exact source-ID/type write authority before ingest, rejects invalid belief
+  or artifact endpoints at dependency registration, and separates dependency usability from
+  correction eligibility so current disputed/retracted/do-not-use beliefs remain correctable.
+  → verified: `.venv/bin/python -m pytest -vv tests/test_propagation.py` — **51 passed**;
+  full suite — **193 passed**.
 
 - **M7 — audit + trust modes.** `audit.py` (`explain(trace_id)`), `--propose` approval queue,
   ephemeral no-write sessions. No silent commits anywhere.
