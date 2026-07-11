@@ -32,11 +32,29 @@ CREATED = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
 DEADLINE = CREATED + timedelta(days=5)
 
 
+class FakeClock:
+    def __init__(self, instant: datetime):
+        self.instant = instant
+
+    def __call__(self) -> datetime:
+        return self.instant
+
+    def set(self, instant: datetime) -> None:
+        self.instant = instant
+
+
+def set_time(memory: MemoryStore, instant: datetime) -> None:
+    assert isinstance(memory._clock, FakeClock)
+    memory._clock.set(instant)
+
+
 @pytest.fixture
 def commitments(tmp_path):
     db_path = str(tmp_path / "commitments.db")
     policy = load_policy(POLICY_PATH)
-    memory = MemoryStore(db_path, policy, agent_id="support-agent")
+    memory = MemoryStore(
+        db_path, policy, agent_id="support-agent", clock=FakeClock(CREATED)
+    )
     memory._store.add_source(Source(
         id="user",
         type="user",
@@ -59,7 +77,6 @@ def create_request(**overrides) -> CommitmentCreateRequest:
         "owner": "refund-operations",
         "beneficiary": "customer_881",
         "scope": "project:support",
-        "created_at": CREATED,
         "deadline": DEADLINE,
         "preconditions": [],
         "proof_required": False,
@@ -81,15 +98,29 @@ def transition(
     target_state: str,
     *,
     scope: str | None = "project:support",
-    as_of: datetime = CREATED + timedelta(hours=1),
+    at: datetime = CREATED + timedelta(hours=1),
     proof_reference: str | None = None,
 ):
+    set_time(memory, at)
     return memory.transition_commitment(CommitmentTransitionRequest(
         commitment_id=commitment_id,
         target_state=target_state,
         scope=scope,
-        as_of=as_of,
         proof_reference=proof_reference,
+    ))
+
+
+def scan(
+    memory: MemoryStore,
+    *,
+    scope: str | None,
+    at: datetime,
+    task_type: str | None = None,
+):
+    set_time(memory, at)
+    return memory.surface_overdue(OverdueScanRequest(
+        scope=scope,
+        task_type=task_type,
     ))
 
 
@@ -172,7 +203,7 @@ def test_waiting_reaches_every_terminal_state(commitments, target):
     waiting = transition(memory, commitment.id, "waiting")
     assert waiting.ok is True
     result = transition(
-        memory, commitment.id, target, as_of=CREATED + timedelta(hours=2)
+        memory, commitment.id, target, at=CREATED + timedelta(hours=2)
     )
 
     assert result.ok is True
@@ -184,9 +215,11 @@ def test_terminal_states_reject_all_outbound_transitions(commitments, terminal):
     memory, _, _ = commitments
     commitment = add(memory)
     if terminal == "overdue":
-        scanned = memory.surface_overdue(OverdueScanRequest(
-            scope="project:support", as_of=DEADLINE + timedelta(seconds=1)
-        ))
+        scanned = scan(
+            memory,
+            scope="project:support",
+            at=DEADLINE + timedelta(seconds=1),
+        )
         assert [item.id for item in scanned.overdue] == [commitment.id]
     else:
         assert transition(memory, commitment.id, terminal).ok
@@ -195,7 +228,7 @@ def test_terminal_states_reject_all_outbound_transitions(commitments, terminal):
         memory,
         commitment.id,
         "waiting",
-        as_of=DEADLINE + timedelta(days=1),
+        at=DEADLINE + timedelta(days=1),
     )
 
     assert result.ok is False
@@ -227,14 +260,16 @@ def test_manual_overdue_selection_is_rejected_in_favor_of_full_scan(commitments)
         memory,
         commitment.id,
         "overdue",
-        as_of=DEADLINE + timedelta(seconds=1),
+        at=DEADLINE + timedelta(seconds=1),
     )
-    scan = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=DEADLINE + timedelta(seconds=1)
-    ))
+    overdue_scan = scan(
+        memory,
+        scope="project:support",
+        at=DEADLINE + timedelta(seconds=1),
+    )
 
     assert manual.code == CommitmentResultCode.overdue_scan_required
-    assert [item.id for item in scan.overdue] == [commitment.id]
+    assert [item.id for item in overdue_scan.overdue] == [commitment.id]
 
 
 def test_manual_transition_timestamp_cannot_move_backward(commitments):
@@ -244,7 +279,7 @@ def test_manual_transition_timestamp_cannot_move_backward(commitments):
         memory,
         commitment.id,
         "waiting",
-        as_of=CREATED - timedelta(seconds=1),
+        at=CREATED - timedelta(seconds=1),
     )
     assert result.code == CommitmentResultCode.transition_invalid
 
@@ -258,6 +293,39 @@ def test_direct_creation_in_terminal_state_is_not_part_of_typed_api():
     raw["created_by_agent_id"] = "analytics-bot"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         CommitmentCreateRequest.model_validate(raw)
+
+
+def test_public_requests_forbid_all_lifecycle_timestamp_inputs():
+    creation = create_request().model_dump()
+    transition_request = {
+        "commitment_id": 1,
+        "target_state": "waiting",
+        "scope": "project:support",
+    }
+    scan_request = {"scope": "project:support"}
+
+    for field in ("created_at", "updated_at"):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            CommitmentCreateRequest.model_validate({**creation, field: CREATED})
+    for field in ("as_of", "updated_at"):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            CommitmentTransitionRequest.model_validate(
+                {**transition_request, field: CREATED}
+            )
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        OverdueScanRequest.model_validate({**scan_request, "as_of": CREATED})
+
+
+def test_caller_cannot_backdate_creation_and_store_uses_clock(commitments):
+    memory, _, _ = commitments
+    raw = create_request().model_dump()
+    raw["created_at"] = CREATED - timedelta(days=30)
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CommitmentCreateRequest.model_validate(raw)
+
+    commitment = add(memory)
+    assert commitment.created_at == CREATED
+    assert commitment.updated_at == CREATED
 
 
 def test_fulfillment_enforces_present_current_usable_precondition(commitments):
@@ -363,16 +431,63 @@ def test_future_and_exact_deadline_are_not_overdue(commitments):
     memory, _, _ = commitments
     commitment = add(memory)
 
-    future = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=DEADLINE - timedelta(seconds=1)
-    ))
-    equality = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=DEADLINE
-    ))
+    future = scan(
+        memory, scope="project:support", at=DEADLINE - timedelta(seconds=1)
+    )
+    equality = scan(memory, scope="project:support", at=DEADLINE)
+    next_instant = scan(
+        memory,
+        scope="project:support",
+        at=DEADLINE + timedelta(microseconds=1),
+    )
 
     assert future.overdue == []
     assert equality.overdue == []
-    assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
+    assert [item.id for item in next_instant.overdue] == [commitment.id]
+    assert memory._store.get_commitment(commitment.id).state == CommitmentState.overdue
+
+
+def test_caller_cannot_force_or_postpone_overdue_promotion(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        OverdueScanRequest.model_validate({
+            "scope": "project:support",
+            "as_of": DEADLINE + timedelta(days=30),
+        })
+    premature = scan(
+        memory, scope="project:support", at=DEADLINE - timedelta(seconds=1)
+    )
+    assert premature.overdue == []
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        OverdueScanRequest.model_validate({
+            "scope": "project:support",
+            "as_of": DEADLINE - timedelta(days=30),
+        })
+    authoritative = scan(
+        memory, scope="project:support", at=DEADLINE + timedelta(seconds=1)
+    )
+    assert [item.id for item in authoritative.overdue] == [commitment.id]
+
+
+def test_overdue_scan_fails_closed_if_clock_moves_behind_updated_at(commitments):
+    memory, _, _ = commitments
+    commitment = add(memory)
+    assert transition(
+        memory,
+        commitment.id,
+        "waiting",
+        at=DEADLINE + timedelta(days=2),
+    ).ok
+
+    with pytest.raises(ValueError, match="must not move backward"):
+        scan(
+            memory,
+            scope="project:support",
+            at=DEADLINE + timedelta(days=1),
+        )
 
 
 def test_open_and_waiting_promote_after_deadline_and_scan_is_idempotent(commitments):
@@ -380,14 +495,14 @@ def test_open_and_waiting_promote_after_deadline_and_scan_is_idempotent(commitme
     open_commitment = add(memory)
     waiting_commitment = add(memory, description="Waiting refund")
     assert transition(memory, waiting_commitment.id, "waiting").ok
-    as_of = DEADLINE + timedelta(microseconds=1)
+    authoritative_time = DEADLINE + timedelta(microseconds=1)
 
-    first = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=as_of
-    ))
-    second = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=as_of
-    ))
+    first = scan(
+        memory, scope="project:support", at=authoritative_time
+    )
+    second = scan(
+        memory, scope="project:support", at=authoritative_time
+    )
 
     assert first.promoted_count == 2
     assert second.promoted_count == 0
@@ -406,11 +521,13 @@ def test_fulfilled_and_cancelled_never_surface_as_overdue(commitments):
     assert transition(memory, fulfilled.id, "fulfilled").ok
     assert transition(memory, cancelled.id, "cancelled").ok
 
-    scan = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=DEADLINE + timedelta(days=1)
-    ))
+    overdue_scan = scan(
+        memory,
+        scope="project:support",
+        at=DEADLINE + timedelta(days=1),
+    )
 
-    assert scan.overdue == []
+    assert overdue_scan.overdue == []
     assert memory._store.get_commitment(fulfilled.id).state == CommitmentState.fulfilled
     assert memory._store.get_commitment(cancelled.id).state == CommitmentState.cancelled
 
@@ -425,11 +542,13 @@ def test_overdue_order_is_deadline_then_creation_then_immutable_id(commitments):
     first_tie = add(memory, description="First tie")
     second_tie = add(memory, description="Second tie")
 
-    scan = memory.surface_overdue(OverdueScanRequest(
-        scope="project:support", as_of=DEADLINE + timedelta(days=1)
-    ))
+    overdue_scan = scan(
+        memory,
+        scope="project:support",
+        at=DEADLINE + timedelta(days=1),
+    )
 
-    assert [item.id for item in scan.overdue] == [
+    assert [item.id for item in overdue_scan.overdue] == [
         first_tie.id,
         second_tie.id,
         later_deadline.id,
@@ -458,7 +577,9 @@ def test_agent_scope_intersection_excludes_readable_task_secret(commitments):
     global_commitment = add(memory, scope="global", description="Global work")
     secret = "AGENT_SCOPE_COMMITMENT_SECRET"
     add(memory, scope="project:banking", description=secret)
-    analytics = MemoryStore(db_path, policy, agent_id="analytics-bot")
+    analytics = MemoryStore(
+        db_path, policy, agent_id="analytics-bot", clock=FakeClock(CREATED)
+    )
     try:
         result = analytics.list_commitments(
             CommitmentListRequest(scope="project:banking")
@@ -476,16 +597,14 @@ def test_missing_scope_context_fails_closed_for_all_public_commitment_paths(comm
     commitment = add(memory)
     manual = transition(memory, commitment.id, "waiting", scope=None)
     listing = memory.list_commitments(CommitmentListRequest(scope=None))
-    scan = memory.surface_overdue(OverdueScanRequest(
-        scope=None, as_of=DEADLINE + timedelta(days=1)
-    ))
+    overdue_scan = scan(memory, scope=None, at=DEADLINE + timedelta(days=1))
 
     assert create.code == CommitmentResultCode.scope_context_missing
     assert manual.code == CommitmentResultCode.scope_context_missing
     assert listing.code == CommitmentResultCode.scope_context_missing
     assert listing.commitments == []
-    assert scan.code == CommitmentResultCode.scope_context_missing
-    assert scan.overdue == []
+    assert overdue_scan.code == CommitmentResultCode.scope_context_missing
+    assert overdue_scan.overdue == []
 
 
 def test_non_managing_known_agent_cannot_transition_scope_readable_commitment(commitments):
@@ -499,7 +618,9 @@ def test_non_managing_known_agent_cannot_transition_scope_readable_commitment(co
     peer_policy = policy.model_copy(update={
         "agents": {**policy.agents, "peer-agent": peer}
     })
-    other = MemoryStore(db_path, peer_policy, agent_id="peer-agent")
+    other = MemoryStore(
+        db_path, peer_policy, agent_id="peer-agent", clock=FakeClock(CREATED)
+    )
     try:
         result = transition(other, commitment.id, "waiting", scope="global")
     finally:
@@ -513,22 +634,24 @@ def test_non_managing_known_agent_cannot_transition_scope_readable_commitment(co
 def test_analytics_bot_cannot_create_transition_or_trigger_overdue_mutation(commitments):
     memory, policy, db_path = commitments
     commitment = add(memory, scope="global")
-    analytics = MemoryStore(db_path, policy, agent_id="analytics-bot")
+    analytics = MemoryStore(
+        db_path, policy, agent_id="analytics-bot", clock=FakeClock(CREATED)
+    )
     try:
         create = analytics.add_commitment(create_request(scope="global"))
         manual = transition(
             analytics, commitment.id, "waiting", scope="global"
         )
-        scan = analytics.surface_overdue(OverdueScanRequest(
-            scope="global", as_of=DEADLINE + timedelta(days=1)
-        ))
+        overdue_scan = scan(
+            analytics, scope="global", at=DEADLINE + timedelta(days=1)
+        )
     finally:
         analytics.close()
 
     assert create.code == CommitmentResultCode.operation_not_permitted
     assert manual.code == CommitmentResultCode.operation_not_permitted
-    assert scan.code == CommitmentResultCode.operation_not_permitted
-    assert scan.overdue == []
+    assert overdue_scan.code == CommitmentResultCode.operation_not_permitted
+    assert overdue_scan.overdue == []
     assert memory._store.get_commitment(commitment.id).state == CommitmentState.open
 
 
@@ -536,7 +659,9 @@ def test_unknown_agent_is_denied_without_commitment_content_leak(commitments):
     memory, policy, db_path = commitments
     secret = "UNKNOWN_AGENT_COMMITMENT_SECRET"
     add(memory, scope="global", description=secret)
-    ghost = MemoryStore(db_path, policy, agent_id="ghost")
+    ghost = MemoryStore(
+        db_path, policy, agent_id="ghost", clock=FakeClock(CREATED)
+    )
     try:
         listing = ghost.list_commitments(CommitmentListRequest(scope="global"))
         create = ghost.add_commitment(create_request(scope="global"))
@@ -565,7 +690,9 @@ def test_scope_denial_blocks_creation_and_manual_transition(commitments):
             ),
         }
     })
-    agent = MemoryStore(db_path, restricted, agent_id="restricted")
+    agent = MemoryStore(
+        db_path, restricted, agent_id="restricted", clock=FakeClock(CREATED)
+    )
     try:
         create = agent.add_commitment(create_request(scope="project:banking"))
         # It can see the global commitment but is not its managing principal.
@@ -602,9 +729,11 @@ def test_scan_is_scope_safe_and_does_not_mutate_unrelated_commitments(commitment
     banking = add(memory, scope="project:banking", description="Banking overdue")
     hobby = add(memory, scope="project:hobby", description="HOBBY_SCAN_SECRET")
 
-    result = memory.surface_overdue(OverdueScanRequest(
-        scope="project:banking", as_of=DEADLINE + timedelta(days=1)
-    ))
+    result = scan(
+        memory,
+        scope="project:banking",
+        at=DEADLINE + timedelta(days=1),
+    )
 
     assert [item.id for item in result.overdue] == [banking.id]
     assert memory._store.get_commitment(banking.id).state == CommitmentState.overdue
@@ -619,17 +748,17 @@ def test_refund_within_five_days_scenario_surfaces_overdue(commitments):
         description="Refund the customer within 5 days.",
         owner="refund-operations",
         beneficiary="customer_881",
-        created_at=CREATED,
         deadline=CREATED + timedelta(days=5),
     )
 
-    scan = memory.surface_overdue(OverdueScanRequest(
+    overdue_scan = scan(
+        memory,
         scope="project:support",
-        as_of=CREATED + timedelta(days=5, microseconds=1),
-    ))
+        at=CREATED + timedelta(days=5, microseconds=1),
+    )
 
-    assert [item.id for item in scan.overdue] == [refund.id]
-    assert scan.overdue[0].description == "Refund the customer within 5 days."
+    assert [item.id for item in overdue_scan.overdue] == [refund.id]
+    assert overdue_scan.overdue[0].description == "Refund the customer within 5 days."
 
 
 @pytest.mark.parametrize(
@@ -652,14 +781,14 @@ def test_empty_and_malformed_commitment_fields_are_rejected(field, value):
         CommitmentCreateRequest.model_validate(raw)
 
 
-def test_naive_dates_deadline_order_and_malformed_preconditions_are_rejected():
-    naive = CREATED.replace(tzinfo=None)
-    with pytest.raises(ValidationError, match="timezone-aware"):
-        create_request(created_at=naive)
+def test_naive_deadline_order_and_malformed_preconditions_are_rejected(commitments):
+    memory, _, _ = commitments
     with pytest.raises(ValidationError, match="timezone-aware"):
         create_request(deadline=DEADLINE.replace(tzinfo=None))
-    with pytest.raises(ValidationError, match="must not be before"):
+    past_deadline = memory.add_commitment(
         create_request(deadline=CREATED - timedelta(seconds=1))
+    )
+    assert past_deadline.code == CommitmentResultCode.deadline_invalid
     with pytest.raises(ValidationError, match="must be unique"):
         create_request(preconditions=[
             CommitmentPrecondition(belief_id=1),
@@ -669,8 +798,46 @@ def test_naive_dates_deadline_order_and_malformed_preconditions_are_rejected():
         CommitmentPrecondition.model_validate({"belief_id": 0})
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         CommitmentPrecondition.model_validate({"belief_id": 1, "script": "run()"})
-    with pytest.raises(ValidationError, match="timezone-aware"):
-        OverdueScanRequest(scope="global", as_of=naive)
+
+
+def test_default_runtime_clock_returns_aware_utc(tmp_path):
+    memory = MemoryStore(
+        str(tmp_path / "runtime-clock.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+    )
+    try:
+        result = memory.add_commitment(create_request(
+            scope="global",
+            deadline=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        ))
+    finally:
+        memory.close()
+
+    assert result.ok is True
+    assert result.commitment.created_at.tzinfo is not None
+    assert result.commitment.created_at.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "bad_instant",
+    [
+        CREATED.replace(tzinfo=None),
+        CREATED.astimezone(timezone(timedelta(hours=5, minutes=30))),
+    ],
+)
+def test_naive_or_non_utc_clock_result_fails_closed(tmp_path, bad_instant):
+    memory = MemoryStore(
+        str(tmp_path / "bad-clock.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+        clock=FakeClock(bad_instant),
+    )
+    try:
+        with pytest.raises(ValueError, match="timezone-aware UTC"):
+            memory.add_commitment(create_request(scope="global"))
+    finally:
+        memory.close()
 
 
 def test_commitment_operation_policy_rejects_unknown_and_duplicate_entries():

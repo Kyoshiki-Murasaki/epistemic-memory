@@ -1,11 +1,13 @@
 """First-class commitment lifecycle, scope, and authorization for M5.
 
 This module contains the single transition table. It has no clock of its own:
-creation, manual transitions, and overdue scans all receive explicit aware UTC
-timestamps through typed requests.
+creation, manual transitions, and overdue scans receive one authoritative aware
+UTC timestamp from the ``MemoryStore`` boundary for each operation.
 """
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from .models import (
     Commitment,
@@ -146,6 +148,8 @@ def add_commitment(
     policy: TrustPolicy,
     agent_id: str,
     request: CommitmentCreateRequest,
+    *,
+    as_of: datetime,
 ) -> CommitmentMutationResult:
     agent, error = _agent_for_operation(
         policy, agent_id, CommitmentOperation.create
@@ -165,7 +169,14 @@ def add_commitment(
             CommitmentResultCode.scope_denied,
             "commitment scope is not authorized for this agent",
         )
-    commitment = store.add_commitment(request, created_by_agent_id=agent_id)
+    if request.deadline < as_of:
+        return _mutation_failure(
+            CommitmentResultCode.deadline_invalid,
+            "deadline must not be before the authoritative creation time",
+        )
+    commitment = store.add_commitment(
+        request, created_by_agent_id=agent_id, created_at=as_of
+    )
     return CommitmentMutationResult(
         ok=True,
         code=CommitmentResultCode.commitment_created,
@@ -211,6 +222,8 @@ def transition_commitment(
     policy: TrustPolicy,
     agent_id: str,
     request: CommitmentTransitionRequest,
+    *,
+    as_of: datetime,
 ) -> CommitmentMutationResult:
     agent, error = _agent_for_operation(
         policy, agent_id, CommitmentOperation.transition
@@ -259,7 +272,7 @@ def transition_commitment(
             CommitmentResultCode.transition_invalid,
             "transition is not allowed from the current state",
         )
-    if request.as_of < commitment.updated_at:
+    if as_of < commitment.updated_at:
         return _mutation_failure(
             CommitmentResultCode.transition_invalid,
             "transition timestamp must not move backward",
@@ -295,7 +308,7 @@ def transition_commitment(
         commitment.id,
         expected_state=commitment.state,
         target_state=target,
-        updated_at=request.as_of,
+        updated_at=as_of,
         proof_reference=request.proof_reference,
     )
     return CommitmentMutationResult(
@@ -311,6 +324,8 @@ def surface_overdue(
     policy: TrustPolicy,
     agent_id: str,
     request: OverdueScanRequest,
+    *,
+    as_of: datetime,
 ) -> OverdueScanResult:
     agent, error = _agent_for_operation(
         policy, agent_id, CommitmentOperation.scan_overdue
@@ -319,7 +334,7 @@ def surface_overdue(
         return OverdueScanResult(
             authorized=False,
             code=error,
-            as_of=request.as_of,
+            as_of=as_of,
             overdue=[],
             promoted_count=0,
             exclusions=[],
@@ -328,7 +343,7 @@ def surface_overdue(
         return OverdueScanResult(
             authorized=False,
             code=CommitmentResultCode.scope_context_missing,
-            as_of=request.as_of,
+            as_of=as_of,
             overdue=[],
             promoted_count=0,
             exclusions=[],
@@ -342,7 +357,7 @@ def surface_overdue(
     )
     promoted_count = 0
     for commitment in candidates:
-        if request.as_of <= commitment.deadline:
+        if as_of <= commitment.deadline:
             continue
         if not _transition_allowed(commitment.state, CommitmentState.overdue):
             continue
@@ -350,7 +365,7 @@ def surface_overdue(
             commitment.id,
             expected_state=commitment.state,
             target_state=CommitmentState.overdue,
-            updated_at=request.as_of,
+            updated_at=as_of,
             proof_reference=None,
         )
         promoted_count += 1
@@ -361,7 +376,7 @@ def surface_overdue(
     return OverdueScanResult(
         authorized=True,
         code=CommitmentResultCode.overdue_scan_completed,
-        as_of=request.as_of,
+        as_of=as_of,
         overdue=overdue,
         promoted_count=promoted_count,
         exclusions=_scope_exclusions(store, active, effective),

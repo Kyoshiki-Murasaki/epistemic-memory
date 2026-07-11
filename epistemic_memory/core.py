@@ -8,7 +8,8 @@ milestone (M1) wires the class to the store and enforces the API boundary.
 
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
 
 from .assemble import assemble_context
 from .commitments import (
@@ -41,6 +42,24 @@ from .retrieve import retrieve_beliefs
 from .store import Store
 
 
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    """Default lifecycle clock: an aware UTC instant."""
+    return datetime.now(timezone.utc)
+
+
+def _validate_clock_result(value: datetime) -> datetime:
+    if not isinstance(value, datetime):
+        raise ValueError("MemoryStore clock must return a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("MemoryStore clock must return timezone-aware UTC")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError("MemoryStore clock must return timezone-aware UTC")
+    return value.astimezone(timezone.utc)
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -51,6 +70,7 @@ class MemoryStore:
         ephemeral: bool = False,
         propose: bool = False,
         live: bool = False,
+        clock: Optional[Clock] = None,
     ):
         self._store = Store(db_path)
         self.policy = policy
@@ -58,6 +78,10 @@ class MemoryStore:
         self.ephemeral = ephemeral
         self.propose = propose
         self.live = live
+        self._clock = clock if clock is not None else _utc_now
+
+    def _authoritative_now(self) -> datetime:
+        return _validate_clock_result(self._clock())
 
     def close(self) -> None:
         self._store.close()
@@ -161,7 +185,13 @@ class MemoryStore:
                 "MemoryStore requires a policy to add commitments "
                 "(pass policy=load_policy(...))"
             )
-        return _add_commitment(self._store, self.policy, self.agent_id, request)
+        return _add_commitment(
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
+        )
 
     def transition_commitment(
         self, request: CommitmentTransitionRequest
@@ -172,7 +202,11 @@ class MemoryStore:
                 "(pass policy=load_policy(...))"
             )
         return _transition_commitment(
-            self._store, self.policy, self.agent_id, request
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
         )
 
     def list_commitments(
@@ -193,4 +227,10 @@ class MemoryStore:
                 "MemoryStore requires a policy to scan overdue commitments "
                 "(pass policy=load_policy(...))"
             )
-        return _surface_overdue(self._store, self.policy, self.agent_id, request)
+        return _surface_overdue(
+            self._store,
+            self.policy,
+            self.agent_id,
+            request,
+            as_of=self._authoritative_now(),
+        )

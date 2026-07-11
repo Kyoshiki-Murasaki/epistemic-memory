@@ -71,6 +71,7 @@ class CommitmentResultCode(str, Enum):
     proof_required = "proof_required"
     proof_reference_invalid = "proof_reference_invalid"
     proof_not_applicable = "proof_not_applicable"
+    deadline_invalid = "deadline_invalid"
 
 
 _SCOPE_RE = re.compile(
@@ -221,7 +222,6 @@ class _CommitmentDefinition(BaseModel):
     deadline: datetime
     preconditions: list[CommitmentPrecondition] = Field(default_factory=list)
     proof_required: bool = False
-    created_at: datetime
 
     @field_validator("description")
     @classmethod
@@ -238,7 +238,7 @@ class _CommitmentDefinition(BaseModel):
     def validate_scope(cls, value: Optional[str]) -> Optional[str]:
         return _scope(value) if value is not None else None
 
-    @field_validator("created_at", "deadline")
+    @field_validator("deadline")
     @classmethod
     def validate_timestamp(cls, value: datetime, info) -> datetime:
         return _aware_utc(value, info.field_name)
@@ -252,13 +252,6 @@ class _CommitmentDefinition(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("precondition belief references must be unique")
         return values
-
-    @model_validator(mode="after")
-    def validate_deadline(self):
-        if self.deadline < self.created_at:
-            raise ValueError("deadline must not be before created_at")
-        return self
-
 
 class CommitmentCreateRequest(_CommitmentDefinition):
     """Typed input for ``MemoryStore.add_commitment``.
@@ -277,6 +270,7 @@ class Commitment(_CommitmentDefinition):
     created_by_agent_id: str
     state: CommitmentState
     proof_reference: Optional[str] = None
+    created_at: datetime
     updated_at: datetime
 
     @field_validator("created_by_agent_id")
@@ -284,10 +278,18 @@ class Commitment(_CommitmentDefinition):
     def validate_creator(cls, value: str) -> str:
         return _commitment_text(value, "created_by_agent_id", 256)
 
-    @field_validator("updated_at")
+    @field_validator("created_at", "updated_at")
     @classmethod
-    def validate_updated_at(cls, value: datetime) -> datetime:
-        return _aware_utc(value, "updated_at")
+    def validate_lifecycle_timestamp(cls, value: datetime, info) -> datetime:
+        return _aware_utc(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_timestamp_order(self):
+        if self.deadline < self.created_at:
+            raise ValueError("deadline must not be before created_at")
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must not be before created_at")
+        return self
 
 
 class CommitmentTransitionRequest(BaseModel):
@@ -297,7 +299,6 @@ class CommitmentTransitionRequest(BaseModel):
     target_state: str
     scope: Optional[str]
     task_type: Optional[str] = None
-    as_of: datetime
     proof_reference: Optional[str] = None
 
     @field_validator("scope")
@@ -314,12 +315,6 @@ class CommitmentTransitionRequest(BaseModel):
         if ":" in value:
             raise ValueError("task_type must be the bare task name, not a scope string")
         return value
-
-    @field_validator("as_of")
-    @classmethod
-    def validate_as_of(cls, value: datetime) -> datetime:
-        return _aware_utc(value, "as_of")
-
 
 class CommitmentListRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -344,12 +339,7 @@ class CommitmentListRequest(BaseModel):
 
 
 class OverdueScanRequest(CommitmentListRequest):
-    as_of: datetime
-
-    @field_validator("as_of")
-    @classmethod
-    def validate_as_of(cls, value: datetime) -> datetime:
-        return _aware_utc(value, "as_of")
+    pass
 
 
 class CommitmentExclusionSummary(BaseModel):

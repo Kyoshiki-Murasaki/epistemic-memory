@@ -1,8 +1,8 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M5 complete and takeover-audited (135 tests passing). M5 adds
+Status: **M0–M5 complete and clock-authority-audited (142 tests passing). M5 adds
 first-class scoped commitments, explicit policy operations, creator-bound
-manual transitions, and deterministic overdue promotion.**
+manual transitions, and store-clock-authoritative overdue promotion.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
 the final gate); `AI Memory System.markdown` is the WHY where the spec is silent.
 
@@ -421,10 +421,13 @@ class MemoryStore:
   `created_by_agent_id` is immutable and separate from the domain `owner`; policy grants
   explicit `create`, `transition`, and `scan_overdue` operations. Manual transitions are
   creator-bound. Overdue promotion requires `scan_overdue`, uses an explicit aware-UTC
-  `as_of`, promotes every authorized eligible record only when `as_of > deadline`, and is
-  idempotent. Reading remains governed only by the existing task/agent scope intersection.
-  → verified: `.venv/bin/python -m pytest -vv tests/test_commitments.py` — **48 passed**;
-  full suite — **135 passed**.
+  the aware-UTC time supplied by an injectable `MemoryStore` clock, promotes every authorized
+  eligible record only when authoritative time is strictly greater than `deadline`, and is
+  idempotent. Creation and manual-transition lifecycle timestamps use that same boundary;
+  public requests contain no lifecycle timestamp. Reading remains governed only by the existing
+  task/agent scope intersection.
+  → verified: `.venv/bin/python -m pytest -vv tests/test_commitments.py` — **55 passed**;
+  full suite — **142 passed**.
 
 - **M6 — propagation.** `propagate.py`: on invalidation, walk `dependencies`, mark summaries
   stale, halt pending actions, report executed ones.

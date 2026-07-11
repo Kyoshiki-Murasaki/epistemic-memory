@@ -334,7 +334,11 @@ class Store:
     # ----------------------------- commitments ----------------------------
 
     def add_commitment(
-        self, request: CommitmentCreateRequest, *, created_by_agent_id: str
+        self,
+        request: CommitmentCreateRequest,
+        *,
+        created_by_agent_id: str,
+        created_at: datetime,
     ) -> Commitment:
         if request.scope is None:
             raise ValueError("commitment scope is required")
@@ -343,7 +347,7 @@ class Store:
             separators=(",", ":"),
             sort_keys=True,
         )
-        created_at = request.created_at.isoformat()
+        created_at_text = created_at.isoformat()
         cur = self.conn.execute(
             "INSERT INTO commitments (description, owner, beneficiary, scope, "
             "created_by_agent_id, state, deadline, preconditions, proof_required, "
@@ -360,8 +364,8 @@ class Store:
                 preconditions,
                 int(request.proof_required),
                 None,
-                created_at,
-                created_at,
+                created_at_text,
+                created_at_text,
             ),
         )
         self.conn.commit()
@@ -440,6 +444,11 @@ class Store:
         updated_at: datetime,
         proof_reference: Optional[str],
     ) -> Commitment:
+        current = self.get_commitment(commitment_id)
+        if current is None:
+            raise ValueError(f"no such commitment: {commitment_id}")
+        if updated_at < current.updated_at:
+            raise ValueError("commitment timestamp must not move backward")
         cur = self.conn.execute(
             "UPDATE commitments SET state = ?, proof_reference = ?, updated_at = ? "
             "WHERE id = ? AND state = ?",
