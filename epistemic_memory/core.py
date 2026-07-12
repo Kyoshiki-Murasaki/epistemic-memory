@@ -66,6 +66,7 @@ from .models import (
     RetrievalResult,
     SessionMode,
     Scope,
+    Source,
     TrustPolicy,
 )
 from .policy import gate as _gate
@@ -129,6 +130,7 @@ class MemoryStore:
         live: bool = False,
         clock: Optional[Clock] = None,
         id_factory: Optional[IdFactory] = None,
+        trusted_sources: Optional[list[Source]] = None,
     ):
         self._agent_id = _required_text(agent_id, "agent_id")
         self._session_mode = SessionMode(session_mode)
@@ -147,6 +149,12 @@ class MemoryStore:
         self.live = live
         self._clock = clock if clock is not None else _utc_now
         self._transient_traces: dict[str, AuditTrace] = {}
+        if trusted_sources:
+            try:
+                self._install_trusted_sources(trusted_sources)
+            except BaseException:
+                self._store.close()
+                raise
 
     @property
     def agent_id(self) -> str:
@@ -169,6 +177,34 @@ class MemoryStore:
 
     def _authoritative_now(self) -> datetime:
         return _validate_clock_result(self._clock())
+
+    def _install_trusted_sources(self, sources: list[Source]) -> None:
+        """Install an exact host-controlled source catalog.
+
+        Sources are trusted process configuration, not caller-supplied memory
+        requests.  Every entry must already be bound to the same source type by
+        policy.  Reopening with an identical catalog is idempotent; conflicting
+        catalog data fails closed.
+        """
+        if self._session_mode == SessionMode.ephemeral:
+            raise ValueError("ephemeral sessions cannot install trusted sources")
+        policy = self._require_policy("install trusted sources")
+        if len({source.id for source in sources}) != len(sources):
+            raise ValueError("trusted source IDs must be unique")
+        with self._store.transaction(immediate=True):
+            for source in sources:
+                expected_type = policy.source_principals.get(source.id)
+                if expected_type is None or source.type != expected_type:
+                    raise ValueError(
+                        "trusted source catalog must match exact policy principals"
+                    )
+                existing = self._store.get_source(source.id)
+                if existing is None:
+                    self._store.add_source(source)
+                elif existing != source:
+                    raise ValueError(
+                        "trusted source catalog conflicts with persisted source"
+                    )
 
     def _require_policy(self, operation: str) -> TrustPolicy:
         if self.policy is None:

@@ -474,10 +474,43 @@ class MemoryStore:
   → verify: `pytest tests/test_mcp.py` — server starts, tools list, and a scripted second agent
   with read-only/informational permissions is correctly limited by policy.
 
-- **M9 — demo (showpiece).** `demo/__main__.py`: the full **11-step** scenario with `rich`
-  output, memory receipts, token counts — the 10 support steps + a multi-agent permission step,
-  including the scope-leak and injection tests.
-  → verify: `python -m demo` exits 0; `pytest tests/test_demo.py` asserts key lines.
+- **M9 — deterministic demo. (done)** `epistemic_memory/demo.py` runs the binding **11-step**
+  scenario through `MemoryStore`, using a fixed aware-UTC mutable clock, deterministic ID
+  factory, exact policy-bound source catalog, fixture extractors, and a fresh temporary SQLite
+  database by default. It has no live model call, network call, sleep, or wall-clock input. The
+  transcript uses stable plain text plus the existing safe renderer; every step asserts typed
+  results and persisted outcomes before printing success. A constructor-only `trusted_sources`
+  catalog lets the trusted host initialize exact source principals without exposing source setup
+  in requests or importing `Store`/SQLite in production demo code. Proposal, ephemeral, and
+  official stdio MCP proofs remain the existing implementation paths, not demo-specific copies.
+  → run: `.venv/bin/python -m epistemic_memory.demo` or `.venv/bin/epistemic-memory-demo`;
+  optional `--db PATH` creates only a new explicit database and refuses an existing path.
+  → verified: `.venv/bin/python -m pytest -vv tests/test_demo.py` — **28 passed**; two complete
+  runs have byte-identical transcripts; module and console entry points expose side-effect-free
+  `--help`.
+
+### M9 canonical step mapping
+
+The quoted step descriptions below are the current `docs/02_SPEC.md` sequence. Each row records
+the public call, state/audit effect, visible proof, and security invariant used by the demo.
+
+| Step | Binding scenario | Public API and expected state/audit | Visible proof and security invariant |
+|---:|---|---|---|
+| 1 | Customer says “I already paid for order 4411” | `ingest` appends one event and one clamped `user_stated` belief plus ingest trace | belief status/source/scope; requests cannot supply identity or mode |
+| 2 | Billing says payment FAILED | denied support-agent `ingest` changes no file state; authorized billing `ingest` appends `system_verified` evidence and trace | both current IDs; billing impersonation is rejected before extraction; cross-source conflict is not supersession |
+| 3 | Agent drafts a reply | `assemble` and three `gate` calls persist decision traces | both beliefs, P-12 conflict winner, receipt tokens, informational allow, confirmation deny; retrieval never grants action permission |
+| 4 | Refund is requested | `gate(issue_refund)` persists an irreversible denial trace | policy-derived decision type/tier, G-IRREVERSIBLE and P-12, structured missing-value reason |
+| 5 | Company promises refund within 5 days | `add_commitment`, `list_commitments`, and deterministic `surface_overdue` calls create and promote one commitment with mutation traces | owner/beneficiary/deadline/creator; exact deadline stays open, strictly later becomes overdue, repeat scan promotes zero |
+| 6 | London move is considered, then staying in Delhi | three `ingest` calls plus `retrieve`; the relocation-plan replacement points to the old plan while current-city remains Delhi | distinct plan/reality keys and IDs; append-only same-source supersession |
+| 7 | A belief-backed summary is corrected | `register_artifact`, `register_dependency`, pre-correction `gate`, authorized `correct`, and `explain`; replacement plus all propagation changes are atomic and audited | stale output, halted pending action, executed/review-required action, hidden safe count, unchanged historical trace, changed counterfactual |
+| 8 | Pixel-art memory meets a banking task | scoped `ingest`, banking `assemble`/`explain`, and hobby `retrieve` | marker absent from full banking serialization and token weight; safe exclusion count only; authorized hobby retrieval succeeds |
+| 9 | Untrusted credit is planted | untrusted `ingest` clamps to `mentioned`; `gate(apply_credit)` denies; propose-mode `ingest`, approval/rejection, drift failure, listing, and self-approval denial exercise proposal traces | low status and denial; proposal fields immutable; zero pre-approval belief, one clamped approved belief, none rejected/stale, agent cannot self-approve |
+| 10 | Analytics bot connects to the same store | official stdio client lists/calls the six MCP tools; ephemeral `retrieve`, `assemble`, `gate`, `explain`, and blocked mutations reuse `MemoryStore` | receipt-bearing read succeeds, tier ceiling denies refund, schemas omit trusted controls, file hash is unchanged, transient trace disappears after restart |
+| 11 | Explain prints the refund why-chain | `explain` reads the immutable refund and pre-correction traces with belief-removal counterfactuals | historical evidence, conflict, rule IDs, policy fingerprint, current follow-up, and conflict-versus-supersession distinction |
+
+M9 intentionally does not add a general CLI, scheduler, remote MCP transport, UI, benchmark,
+live connector, or README launch material. The MCP smoke normalizes its transient identifiers out
+of the transcript; the canonical direct/propose/ephemeral paths use the fixed demo clock and IDs.
 
 - **M10 — README.** open with the spec's mission statement verbatim, then the pitch, the
   governance comparison table vs Mem0/Zep/Letta (incl. multi-agent permissions), MCP quick-start

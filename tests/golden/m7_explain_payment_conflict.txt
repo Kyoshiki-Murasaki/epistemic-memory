@@ -2,7 +2,7 @@ AUDIT EXPLANATION
 trace:"id-trace-003" operation:"assemble" result:"context_assembled"
 agent:"support-agent" session:"session-audit-001" mode:"direct"
 scope:"global" task_type:"none" at:"2026-07-11T10:00:00+00:00"
-policy:version=1 fingerprint:"8a48325b6293ffe75783113a2107f3ddd7389075f80345233d4a10b4c4066948"
+policy:version=1 fingerprint:"6b05dcd6766fbf7304e88de08e765108d243b22519e2f824484df1ee5f57e72e"
 reasons:"conflict_detected","action_policy_selected","evidence_winner_selected","evidence_conflict_detected","gate_checks_passed","evidence_required_value_missing","task_scope_mismatch","agent_scope_denied","non_current","unusable_status","below_status_floor","provenance_unconfigured","status_exceeds_source_ceiling","invalid_timestamp","token_budget"
 rules:"R-NOQUERY-001","R-SCOPE-EFFECTIVE-001","R-CURRENT-001","R-USABLE-001","R-PROVENANCE-001","R-RANK-001","R-SCOPE-TASK-001","R-SCOPE-AGENT-001","R-STATUS-FLOOR-001","R-STATUS-CEILING-001","R-TIMESTAMP-001","R-BUDGET-001","P-12","G-INFORMATIONAL","G-HIGH-STAKES","G-IRREVERSIBLE","R-TOKEN-001"
 

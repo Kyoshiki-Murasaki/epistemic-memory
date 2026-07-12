@@ -354,7 +354,7 @@ def test_ingest_source_policy_requires_exact_known_principals():
     unknown = {**raw, "agents": {**raw["agents"]}}
     unknown["agents"]["support-agent"] = {
         **raw["agents"]["support-agent"],
-        "ingest_source_ids": ["billing"],
+        "ingest_source_ids": ["unknown-source"],
     }
     with pytest.raises(ValidationError, match="unknown ingest source IDs"):
         TrustPolicy.model_validate(unknown)

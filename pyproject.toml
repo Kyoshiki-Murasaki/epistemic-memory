@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 epistemic-memory-mcp = "epistemic_memory.mcp_server:main"
+epistemic-memory-demo = "epistemic_memory.demo:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

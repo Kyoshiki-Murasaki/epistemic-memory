@@ -1164,7 +1164,9 @@ def test_policy_rejects_unknown_empty_duplicate_or_wildcard_writable_sources():
     policy = load_policy(POLICY_PATH)
     raw = policy.model_dump(mode="json")
     unknown = deepcopy(raw)
-    unknown["agents"]["support-agent"]["writable_source_ids"].append("billing")
+    unknown["agents"]["support-agent"]["writable_source_ids"].append(
+        "unknown-source"
+    )
     empty = deepcopy(raw)
     empty["agents"]["support-agent"]["writable_source_ids"].append("")
     duplicate = deepcopy(raw)

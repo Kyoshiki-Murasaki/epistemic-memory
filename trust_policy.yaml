@@ -48,6 +48,8 @@ source_status_ceiling:
 source_principals:
   support-agent: agent_inference
   user: user
+  billing: billing_system
+  untrusted: untrusted_channel
 
 # ---------------------------------------------------------------------------
 # Trust matrix — which source TYPE is authoritative for which decision type.
@@ -141,4 +143,18 @@ agents:
     commitment_operations: []
     memory_operations: [explain]
     ingest_source_ids: []
+    writable_source_ids: []
+  billing-ingestor:
+    max_action_tier: informational
+    allowed_scopes: ["global", "project:*"]
+    commitment_operations: []
+    memory_operations: [correct]
+    ingest_source_ids: [billing]
+    writable_source_ids: [billing]
+  untrusted-ingestor:
+    max_action_tier: informational
+    allowed_scopes: ["global"]
+    commitment_operations: []
+    memory_operations: []
+    ingest_source_ids: [untrusted]
     writable_source_ids: []
