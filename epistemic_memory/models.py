@@ -74,6 +74,9 @@ class AuditResultCode(str, Enum):
 
 class IngestResultCode(str, Enum):
     beliefs_committed = "beliefs_committed"
+    agent_unknown = "agent_unknown"
+    source_write_not_permitted = "source_write_not_permitted"
+    source_invalid = "source_invalid"
     audit_persistence_failed = "audit_persistence_failed"
     ephemeral_write_blocked = "ephemeral_write_blocked"
 
@@ -102,6 +105,7 @@ class ProposalResultCode(str, Enum):
     candidate_scope_denied = "candidate_scope_denied"
     candidate_structure_invalid = "candidate_structure_invalid"
     source_invalid = "source_invalid"
+    source_write_not_permitted = "source_write_not_permitted"
     policy_changed = "policy_changed"
     structurally_stale = "structurally_stale"
     audit_persistence_failed = "audit_persistence_failed"
@@ -984,6 +988,7 @@ class AgentPermissions(_PolicyModel):
     allowed_scopes: list[str]
     commitment_operations: list[CommitmentOperation] = Field(default_factory=list)
     memory_operations: list[MemoryOperation] = Field(default_factory=list)
+    ingest_source_ids: list[str] = Field(default_factory=list)
     writable_source_ids: list[str] = Field(default_factory=list)
 
     @field_validator("allowed_scopes")
@@ -1015,6 +1020,17 @@ class AgentPermissions(_PolicyModel):
     ) -> list[MemoryOperation]:
         if len(values) != len(set(values)):
             raise ValueError("memory_operations entries must be unique")
+        return values
+
+    @field_validator("ingest_source_ids")
+    @classmethod
+    def validate_ingest_source_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("ingest_source_ids entries must be unique")
+        for value in values:
+            _nonempty(value, "ingest_source_ids entry")
+            if "*" in value:
+                raise ValueError("ingest_source_ids entries must be exact source IDs")
         return values
 
     @field_validator("writable_source_ids")
@@ -1081,6 +1097,12 @@ class TrustPolicy(_PolicyModel):
                 )
         known_source_ids = set(self.source_principals)
         for agent_id, permissions in self.agents.items():
+            unknown_ingest_ids = set(permissions.ingest_source_ids) - known_source_ids
+            if unknown_ingest_ids:
+                raise ValueError(
+                    f"agent {agent_id!r} references unknown ingest source IDs: "
+                    f"{sorted(unknown_ingest_ids)}"
+                )
             unknown_source_ids = set(permissions.writable_source_ids) - known_source_ids
             if unknown_source_ids:
                 raise ValueError(

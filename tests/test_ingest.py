@@ -10,17 +10,28 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import epistemic_memory.core as core_module
 from epistemic_memory.core import MemoryStore
-from epistemic_memory.models import CandidateBelief, EpistemicStatus, Source
+from epistemic_memory.models import (
+    CandidateBelief,
+    EpistemicStatus,
+    IngestResultCode,
+    Source,
+    TrustPolicy,
+)
 from epistemic_memory.policy import load_policy
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "trust_policy.yaml")
 
 
 @pytest.fixture
-def ms(tmp_path):
-    policy = load_policy(POLICY_PATH)
-    m = MemoryStore(str(tmp_path / "ingest.db"), policy, agent_id="test-agent")
+def ms(tmp_path, policy_with_ingest_sources):
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH),
+        "support-agent",
+        {"user": "user", "support-agent": "agent_inference", "billing": "billing_system"},
+    )
+    m = MemoryStore(str(tmp_path / "ingest.db"), policy, agent_id="support-agent")
     m._store.add_source(Source(id="user", type="user", label="Customer chat", created_at="2026-07-01"))
     m._store.add_source(
         Source(id="billing", type="billing_system", label="Billing system", created_at="2026-07-01")
@@ -104,19 +115,36 @@ def test_event_meta_round_trips(ms):
     assert result.event.meta == {"order_id": "4411", "channel": "chat"}
 
 
-def test_unknown_source_type_rejected(tmp_path):
-    policy = load_policy(POLICY_PATH)
-    m = MemoryStore(str(tmp_path / "x.db"), policy, agent_id="test-agent")
+def test_authorized_source_type_mismatch_fails_closed(
+    tmp_path, policy_with_ingest_sources
+):
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH), "support-agent", {"weird": "user"}
+    )
+    m = MemoryStore(str(tmp_path / "x.db"), policy, agent_id="support-agent")
     m._store.add_source(Source(id="weird", type="mystery_source", label="?", created_at="2026-07-01"))
-    with pytest.raises(ValueError):
-        m.ingest(source_id="weird", content="...", scope="global", extractor=overreaching_user_claim)
+    result = m.ingest(
+        source_id="weird",
+        content="...",
+        scope="global",
+        extractor=overreaching_user_claim,
+    )
+    assert result.code == IngestResultCode.source_invalid
+    assert result.event is None
+    assert result.beliefs == []
     m.close()
 
 
 def test_unknown_source_id_rejected(ms):
-    with pytest.raises(ValueError):
-        ms.ingest(source_id="does-not-exist", content="...", scope="global",
-                   extractor=overreaching_user_claim)
+    result = ms.ingest(
+        source_id="does-not-exist",
+        content="...",
+        scope="global",
+        extractor=overreaching_user_claim,
+    )
+    assert result.code == IngestResultCode.source_write_not_permitted
+    assert result.event is None
+    assert result.beliefs == []
 
 
 def test_no_extractor_without_live_flag_raises(ms):
@@ -130,6 +158,215 @@ def test_ingest_without_policy_raises(tmp_path):
     with pytest.raises(ValueError):
         m.ingest(source_id="user", content="...", scope="global", extractor=overreaching_user_claim)
     m.close()
+
+
+@pytest.mark.parametrize("mode", ["direct", "propose"])
+def test_exact_source_authority_precedes_candidate_extraction_and_every_write(
+    tmp_path, mode
+):
+    memory = MemoryStore(
+        str(tmp_path / f"denied-{mode}.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+        session_mode=mode,
+    )
+    memory._store.add_source(Source(
+        id="billing",
+        type="billing_system",
+        label="Billing",
+        created_at="2026-07-01",
+    ))
+    extracted = 0
+
+    def forbidden_extractor(_event, _source_type):
+        nonlocal extracted
+        extracted += 1
+        return [CandidateBelief.model_validate({
+            "entity": "order_4411",
+            "attribute": "payment_status",
+            "value": "paid",
+            "proposed_status": "system_verified",
+            "scope": "global",
+            "decision_type": "payment_status",
+        })]
+
+    try:
+        result = memory.ingest(
+            source_id="billing",
+            content="forged billing record",
+            scope="global",
+            extractor=forbidden_extractor,
+        )
+        assert result.ok is False
+        assert result.code.value == "source_write_not_permitted"
+        assert result.trace_id is None
+        assert extracted == 0
+        for table in ("events", "beliefs", "proposals", "audit_traces"):
+            assert memory._store.conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0] == 0
+    finally:
+        memory.close()
+
+
+@pytest.mark.parametrize("mode", ["direct", "propose"])
+def test_exact_source_authority_precedes_live_extraction(tmp_path, monkeypatch, mode):
+    memory = MemoryStore(
+        str(tmp_path / f"live-denied-{mode}.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+        session_mode=mode,
+        live=True,
+    )
+    memory._store.add_source(Source(
+        id="billing",
+        type="billing_system",
+        label="Billing",
+        created_at="2026-07-01",
+    ))
+    called = False
+
+    def forbidden_live_extractor(_event, _source_type):
+        nonlocal called
+        called = True
+        raise AssertionError("live extraction must follow source authorization")
+
+    monkeypatch.setattr(core_module, "live_extractor", forbidden_live_extractor)
+    try:
+        result = memory.ingest(
+            source_id="billing",
+            content="forged billing record",
+            scope="global",
+        )
+        assert result.code.value == "source_write_not_permitted"
+        assert called is False
+        assert memory._store.conn.execute(
+            "SELECT COUNT(*) FROM events"
+        ).fetchone()[0] == 0
+    finally:
+        memory.close()
+
+
+def test_authorized_user_attribution_is_clamped_only_after_authorization(tmp_path):
+    memory = MemoryStore(
+        str(tmp_path / "authorized-user.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+    )
+    memory._store.add_source(Source(
+        id="user", type="user", label="User", created_at="2026-07-01"
+    ))
+    try:
+        result = memory.ingest(
+            source_id="user",
+            content="I paid",
+            scope="global",
+            extractor=overreaching_user_claim,
+        )
+        assert result.code == IngestResultCode.beliefs_committed
+        assert result.beliefs[0].status == EpistemicStatus.user_stated
+        trace = memory._store.get_audit_trace(result.trace_id)
+        assert "M8-INGEST-SOURCE-AUTHORITY-001" in trace.rule_ids
+    finally:
+        memory.close()
+
+
+def test_unknown_direct_agent_fails_before_extraction_or_writes(tmp_path):
+    memory = MemoryStore(
+        str(tmp_path / "unknown-agent.db"),
+        load_policy(POLICY_PATH),
+        agent_id="unknown-agent",
+    )
+    memory._store.add_source(Source(
+        id="user", type="user", label="User", created_at="2026-07-01"
+    ))
+    called = False
+
+    def extractor(_event, _source_type):
+        nonlocal called
+        called = True
+        return []
+
+    try:
+        result = memory.ingest(
+            source_id="user", content="x", scope="global", extractor=extractor
+        )
+        assert result.code == IngestResultCode.agent_unknown
+        assert called is False
+        assert memory._store.conn.execute(
+            "SELECT COUNT(*) FROM events"
+        ).fetchone()[0] == 0
+    finally:
+        memory.close()
+
+
+def test_authorized_but_missing_source_fails_before_extraction(tmp_path):
+    memory = MemoryStore(
+        str(tmp_path / "missing-authorized-source.db"),
+        load_policy(POLICY_PATH),
+        agent_id="support-agent",
+    )
+    called = False
+
+    def extractor(_event, _source_type):
+        nonlocal called
+        called = True
+        return []
+
+    try:
+        result = memory.ingest(
+            source_id="user", content="x", scope="global", extractor=extractor
+        )
+        assert result.code == IngestResultCode.source_invalid
+        assert called is False
+        assert result.event is None
+    finally:
+        memory.close()
+
+
+def test_read_access_does_not_grant_ingest_source_authority(tmp_path):
+    memory = MemoryStore(
+        str(tmp_path / "read-is-not-write.db"),
+        load_policy(POLICY_PATH),
+        agent_id="analytics-bot",
+    )
+    memory._store.add_source(Source(
+        id="user", type="user", label="User", created_at="2026-07-01"
+    ))
+    try:
+        result = memory.ingest(
+            source_id="user",
+            content="analytics attempts attribution",
+            scope="global",
+            extractor=lambda _event, _source_type: [],
+        )
+        assert result.code == IngestResultCode.source_write_not_permitted
+        assert memory._store.conn.execute(
+            "SELECT COUNT(*) FROM events"
+        ).fetchone()[0] == 0
+    finally:
+        memory.close()
+
+
+def test_ingest_source_policy_requires_exact_known_principals():
+    raw = load_policy(POLICY_PATH).model_dump(mode="json")
+
+    unknown = {**raw, "agents": {**raw["agents"]}}
+    unknown["agents"]["support-agent"] = {
+        **raw["agents"]["support-agent"],
+        "ingest_source_ids": ["billing"],
+    }
+    with pytest.raises(ValidationError, match="unknown ingest source IDs"):
+        TrustPolicy.model_validate(unknown)
+
+    for invalid in (["user", "user"], ["user:*"], [""]):
+        malformed = {**raw, "agents": {**raw["agents"]}}
+        malformed["agents"]["support-agent"] = {
+            **raw["agents"]["support-agent"],
+            "ingest_source_ids": invalid,
+        }
+        with pytest.raises(ValidationError):
+            TrustPolicy.model_validate(malformed)
 
 
 @pytest.mark.parametrize(

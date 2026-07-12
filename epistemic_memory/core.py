@@ -178,6 +178,26 @@ class MemoryStore:
             )
         return self.policy
 
+    def _ingest_authority_problem(
+        self, policy: TrustPolicy, source_id: str
+    ) -> tuple[str, str] | None:
+        agent = policy.agents.get(self._agent_id)
+        if agent is None:
+            return ("agent_unknown", "authenticated agent is not configured")
+        if source_id not in agent.ingest_source_ids:
+            return (
+                "source_write_not_permitted",
+                "agent is not authorized to ingest for the requested provenance source",
+            )
+        source = self._store.get_source(source_id)
+        expected_type = policy.source_principals.get(source_id)
+        if source is None or expected_type is None or source.type != expected_type:
+            return (
+                "source_invalid",
+                "authorized ingest source is unavailable or misconfigured",
+            )
+        return None
+
     def _required_audit_insert(self, trace: AuditTrace) -> AuditTrace:
         try:
             return self._store.add_audit_trace(trace)
@@ -218,6 +238,28 @@ class MemoryStore:
                 beliefs=[],
             )
         policy = self._require_policy("ingest")
+        if self._session_mode == SessionMode.propose:
+            try:
+                propose_agent(policy, self._agent_id)
+            except ProposalWorkflowError as exc:
+                return ProposalCreateResult(
+                    ok=False, code=exc.code, message=str(exc)
+                )
+        authority_problem = self._ingest_authority_problem(policy, source_id)
+        if authority_problem is not None:
+            code, message = authority_problem
+            if self._session_mode == SessionMode.propose:
+                return ProposalCreateResult(
+                    ok=False,
+                    code=ProposalResultCode(code),
+                    message=message,
+                )
+            return IngestResult(
+                ok=False,
+                code=IngestResultCode(code),
+                event=None,
+                beliefs=[],
+            )
         if extractor is None:
             if not self.live:
                 raise ValueError(
@@ -228,12 +270,6 @@ class MemoryStore:
             extractor = live_extractor
 
         if self._session_mode == SessionMode.propose:
-            try:
-                propose_agent(policy, self._agent_id)
-            except ProposalWorkflowError as exc:
-                return ProposalCreateResult(
-                    ok=False, code=exc.code, message=str(exc)
-                )
             if scope is None:
                 return ProposalCreateResult(
                     ok=False,
@@ -287,7 +323,11 @@ class MemoryStore:
                         outcome=AuditOutcome.completed,
                         result_code=ProposalResultCode.proposals_created.value,
                         reason_codes=[ProposalResultCode.proposals_created.value],
-                        rule_ids=["M7-PROPOSAL-CREATE-001", "M2-STATUS-CLAMP-001"],
+                        rule_ids=[
+                            "M8-INGEST-SOURCE-AUTHORITY-001",
+                            "M7-PROPOSAL-CREATE-001",
+                            "M2-STATUS-CLAMP-001",
+                        ],
                         policy=policy,
                         created_at=as_of,
                     )
@@ -343,6 +383,7 @@ class MemoryStore:
                     result_code=IngestResultCode.beliefs_committed.value,
                     reason_codes=[IngestResultCode.beliefs_committed.value],
                     rule_ids=[
+                        "M8-INGEST-SOURCE-AUTHORITY-001",
                         "M7-DIRECT-INGEST-AUDIT-001",
                         "M2-STATUS-CLAMP-001",
                         "M1-SAME-SOURCE-SUPERSESSION-001",

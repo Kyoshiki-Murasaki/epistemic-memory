@@ -42,11 +42,12 @@ source_status_ceiling:
   agent_inference:   ai_inferred
   untrusted_channel: mentioned
 
-# Exact provenance principals that policy-controlled corrections may write as.
+# Exact provenance principals that policy-controlled ingest/corrections may write as.
 # The value binds each ID to its expected runtime source type, preventing an
 # authorized ID from being re-registered with a stronger status ceiling.
 source_principals:
   support-agent: agent_inference
+  user: user
 
 # ---------------------------------------------------------------------------
 # Trust matrix — which source TYPE is authoritative for which decision type.
@@ -132,10 +133,12 @@ agents:
     allowed_scopes: ["global", "persona", "project:*", "task_type:*"]
     commitment_operations: [create, transition, scan_overdue]
     memory_operations: [correct, register_artifact, register_dependency, explain, propose]
+    ingest_source_ids: [user, support-agent]
     writable_source_ids: [support-agent]
   analytics-bot:
     max_action_tier: informational
     allowed_scopes: ["global"]
     commitment_operations: []
     memory_operations: [explain]
+    ingest_source_ids: []
     writable_source_ids: []
