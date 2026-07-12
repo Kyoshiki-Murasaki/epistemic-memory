@@ -263,8 +263,18 @@ def test_policy_semantic_validation_rejects_malformed_entries():
 
 
 @pytest.fixture
-def ms(tmp_path):
-    policy = load_policy(POLICY_PATH)
+def ms(tmp_path, policy_with_ingest_sources):
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH),
+        "support-agent",
+        {
+            "user": "user",
+            "support-agent": "agent_inference",
+            "billing": "billing_system",
+            "billing2": "billing_system",
+            "injected": "third_party",
+        },
+    )
     m = MemoryStore(str(tmp_path / "policy.db"), policy, agent_id="support-agent")
     for sid, stype, label in [
         ("user", "user", "Customer chat"),

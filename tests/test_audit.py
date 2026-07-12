@@ -98,8 +98,17 @@ def extractor_for(
 
 
 @pytest.fixture
-def m7(tmp_path):
-    policy = load_policy(POLICY_PATH)
+def m7(tmp_path, policy_with_ingest_sources):
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH),
+        "support-agent",
+        {
+            "user": "user",
+            "support-agent": "agent_inference",
+            "billing": "billing_system",
+            "billing2": "billing_system",
+        },
+    )
     clock = FixedClock()
     ids = SequenceIds()
     db_path = str(tmp_path / "m7.db")

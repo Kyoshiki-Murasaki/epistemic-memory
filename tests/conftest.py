@@ -4,10 +4,23 @@ from types import SimpleNamespace
 import pytest
 
 from epistemic_memory.core import MemoryStore
-from epistemic_memory.models import Belief, EpistemicStatus, Source
+from epistemic_memory.models import Belief, EpistemicStatus, Source, TrustPolicy
 from epistemic_memory.policy import load_policy
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "trust_policy.yaml")
+
+
+@pytest.fixture
+def policy_with_ingest_sources():
+    """Return a revalidated policy with explicit test-only source principals."""
+
+    def grant(policy, agent_id: str, source_types: dict[str, str]):
+        raw = policy.model_dump(mode="json")
+        raw["source_principals"].update(source_types)
+        raw["agents"][agent_id]["ingest_source_ids"] = list(source_types)
+        return TrustPolicy.model_validate(raw)
+
+    return grant
 
 
 @pytest.fixture

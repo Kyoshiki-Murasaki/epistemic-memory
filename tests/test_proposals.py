@@ -79,8 +79,16 @@ def extractor(*values: CandidateBelief):
 
 
 @pytest.fixture
-def proposals(tmp_path):
-    policy = load_policy(POLICY_PATH)
+def proposals(tmp_path, policy_with_ingest_sources):
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH),
+        "support-agent",
+        {
+            "user": "user",
+            "support-agent": "agent_inference",
+            "billing": "billing_system",
+        },
+    )
     clock = Clock()
     ids = IDs("owner")
     db_path = str(tmp_path / "proposals.db")

@@ -174,8 +174,9 @@ def _description(tool: str) -> str:
         "memory_ingest": (
             "Ingests an event through MemoryStore. Direct mode persists an event, beliefs, "
             "and audit trace; propose mode persists proposals instead of beliefs; ephemeral "
-            "mode fails closed. Agent identity and mode are host-controlled. Returns the full "
-            "typed ingest/proposal result and trace ID."
+            "mode fails closed. Agent identity and mode are host-controlled, and source "
+            "attribution requires an exact policy allowlist. Returns the full typed "
+            "ingest/proposal result and trace ID."
         ),
         "memory_retrieve": (
             "Performs governed raw retrieval through MemoryStore with mandatory task scope. "

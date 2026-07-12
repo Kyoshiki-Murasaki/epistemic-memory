@@ -53,9 +53,17 @@ class FakeClock:
 
 
 @pytest.fixture
-def m6(tmp_path):
+def m6(tmp_path, policy_with_ingest_sources):
     db_path = str(tmp_path / "m6.db")
-    policy = load_policy(POLICY_PATH)
+    policy = policy_with_ingest_sources(
+        load_policy(POLICY_PATH),
+        "support-agent",
+        {
+            "user": "user",
+            "support-agent": "agent_inference",
+            "billing": "billing_system",
+        },
+    )
     clock = FakeClock(NOW)
     memory = MemoryStore(
         db_path, policy, agent_id="support-agent", clock=clock
