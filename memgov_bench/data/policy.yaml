@@ -1,0 +1,116 @@
+version: 1
+
+status_strength:
+  system_verified: 100
+  corroborated: 80
+  user_stated: 50
+  promised: 45
+  planned: 40
+  considering: 30
+  third_party_stated: 30
+  ai_inferred: 20
+  mentioned: 10
+  disputed: 5
+  superseded: 0
+  retracted: 0
+  do_not_use: 0
+
+source_status_ceiling:
+  billing_system: system_verified
+  crm: system_verified
+  manager: corroborated
+  user: user_stated
+  document: third_party_stated
+  third_party: third_party_stated
+  agent_inference: ai_inferred
+  untrusted_channel: mentioned
+
+source_principals:
+  support-agent: agent_inference
+  user: user
+  billing: billing_system
+  untrusted: untrusted_channel
+
+trust_matrix:
+  payment_status:
+    rule_id: P-12
+    authoritative: [billing_system]
+    ranking: [billing_system, crm, manager, user, agent_inference, third_party]
+  credit_owed:
+    rule_id: P-20
+    authoritative: [billing_system, manager]
+    ranking: [billing_system, manager, user, third_party, untrusted_channel]
+  preferred_name:
+    rule_id: P-03
+    authoritative: [user]
+    ranking: [user, crm, agent_inference]
+  current_city:
+    rule_id: P-07
+    authoritative: [user]
+    ranking: [user, crm, third_party, agent_inference]
+
+risk_tiers: [informational, low_stakes, high_stakes, irreversible]
+
+gate_rules:
+  informational:
+    rule_id: G-INFORMATIONAL
+    min_status: mentioned
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: false
+  low_stakes:
+    rule_id: G-LOW-STAKES
+    min_status: user_stated
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: true
+  high_stakes:
+    rule_id: G-HIGH-STAKES
+    min_status: corroborated
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+  irreversible:
+    rule_id: G-IRREVERSIBLE
+    min_status: system_verified
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+
+actions:
+  acknowledge_claim: {risk: informational, decision: payment_status}
+  ask_for_receipt: {risk: informational, decision: payment_status}
+  update_preferred_name: {risk: low_stakes, decision: preferred_name}
+  confirm_payment: {risk: high_stakes, decision: payment_status, require_value: paid}
+  issue_refund: {risk: irreversible, decision: payment_status, require_value: paid}
+  apply_credit: {risk: irreversible, decision: credit_owed}
+
+agents:
+  support-agent:
+    max_action_tier: irreversible
+    allowed_scopes: [global, persona, "project:*", "task_type:*"]
+    commitment_operations: [create, transition, scan_overdue]
+    memory_operations: [correct, register_artifact, register_dependency, explain, propose]
+    ingest_source_ids: [user, support-agent]
+    writable_source_ids: [support-agent]
+  analytics-bot:
+    max_action_tier: informational
+    allowed_scopes: [global]
+    commitment_operations: []
+    memory_operations: [explain]
+    ingest_source_ids: []
+    writable_source_ids: []
+  billing-ingestor:
+    max_action_tier: informational
+    allowed_scopes: [global, "project:*"]
+    commitment_operations: []
+    memory_operations: [correct]
+    ingest_source_ids: [billing]
+    writable_source_ids: [billing]
+  untrusted-ingestor:
+    max_action_tier: informational
+    allowed_scopes: [global]
+    commitment_operations: []
+    memory_operations: []
+    ingest_source_ids: [untrusted]
+    writable_source_ids: []

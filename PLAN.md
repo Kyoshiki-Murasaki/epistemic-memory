@@ -1,9 +1,9 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M10 complete (329 tests passing). M10 makes the README the authoritative
-release entry point, adds least-privileged executable examples, and binds documentation claims
-to code, schemas, the deterministic demo, and isolated-install checks. MemGov-Bench and later
-milestones are not implemented.**
+Status: **M0–M11 complete. M11 adds the deterministic five-dimension MemGov-Bench self-evaluation
+through the public `MemoryStore` boundary, ten independently labelled synthetic cases, exact
+three-run scoring and variance, and focused validity/reproducibility checks. Later milestones are
+not implemented.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
 the final gate); `AI Memory System.markdown` is the WHY where the spec is silent.
 
@@ -550,12 +550,12 @@ of the transcript; the canonical direct/propose/ephemeral paths use the fixed de
 | Category comparison and contribution path | `README.md`; `docs/04_USER_RESEARCH.md`; `docs/05_ADOPTION_STRATEGY.md` | no unsupported/superiority/benchmark-result claim checks |
 | Documentation and release hygiene | `tests/test_docs.py`; this M10 record | 26 focused checks; 329-test full suite; clean diff checks |
 
-M10 deliberately leaves the pilot's known boundaries intact: local SQLite/FTS5, one-process
-operation, stdio-only MCP, host-controlled identity, optional live extraction, no hosted auth,
-remote transport, scheduler, UI, telemetry, cryptographic tamper evidence, declared license, or
-benchmark. M11 remains the first benchmark milestone and has not begun.
+M10 deliberately left the pilot's known boundaries intact at that checkpoint: local SQLite/FTS5,
+one-process operation, stdio-only MCP, host-controlled identity, optional live extraction, no
+hosted auth, remote transport, scheduler, UI, telemetry, cryptographic tamper evidence, declared
+license, or benchmark. M11 adds only the finite local benchmark described below.
 
-- **M11 — MemGov-Bench (the category play; see `05_ADOPTION_STRATEGY.md`).** `memgov_bench/`:
+- **M11 — MemGov-Bench (the category play; see `05_ADOPTION_STRATEGY.md`). (done)** `memgov_bench/`:
   runnable `python -m memgov_bench --adapter ours` scoring five dimensions (stale-fact leakage,
   claim/fact confusion, scope leakage, injection resistance, gate correctness) via deterministic
   scripted scenarios, pass/fail, **run 3× with variance reported**. Adapter interface + reference
@@ -563,6 +563,29 @@ benchmark. M11 remains the first benchmark milestone and has not begun.
   a dimension" is itself a reportable result). Output: a markdown scores table the README embeds.
   → verify: `python -m memgov_bench --adapter ours` prints the table and exits 0;
   `pytest tests/test_memgov_bench.py` asserts our adapter passes all five dimensions.
+
+  The canonical implementation contains two static synthetic cases per dimension. Every case
+  compares a typed observation with a frozen fixture expectation; the adapter never reads the
+  expected label. Each case gets fresh temporary state, a fixed UTC clock, deterministic IDs, and
+  only public `MemoryStore` calls. A case mismatch is a benchmark failure; malformed observations
+  or execution faults are harness errors. Dimensions require all cases, overall requires every
+  dimension in all three runs, and scores are never averaged into a passing overall result.
+
+  Three complete self-evaluation runs each passed 10/10 cases: every dimension was 2/2, mean/min/
+  max were 100.00%, variance was 0.0000 percentage-points squared, and no correctness outcome
+  differed. The minimal always-deny control failed all five dimensions. Mem0/Letta remain stretch
+  adapters; no vendor integration, model trial, remote transport, publication, performance score,
+  or later-milestone work was added. This is finite deterministic conformance evidence, not
+  population-level statistical or production-readiness evidence.
+
+  → verified: focused benchmark **26 passed**; full suite **355 passed**. Three separate canonical
+  CLI invocations were byte-identical at SHA-256
+  `ebacd6df735e81a51585500873b2703576d45f19d39c3321017959752db4884f`; each invocation recorded
+  three identical 10/10 runs with zero variance. A dependency-resolving isolated editable install,
+  isolated benchmark run, `pip check`, packaged policy validation, reordered cases, invalid
+  fixtures, negative-control sensitivity, exact six MCP tools, SQLite/import/static boundary
+  scans, `compileall`, `git diff --check`, and the unchanged M9 demo SHA-256
+  `4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc` all passed.
 
 **Final gate:** run the entire `02_SPEC.md` "Success criteria" section and paste output —
 full `pytest`, `python -m demo` exit 0, the immutability grep returns nothing, and every wrong

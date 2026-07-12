@@ -73,6 +73,7 @@ def test_readme_references_current_install_and_console_commands():
         "epistemic-memory-demo",
         "epistemic-memory-mcp --help",
         "python -m epistemic_memory.mcp_server --help",
+        "python -m memgov_bench --adapter ours",
     ):
         assert command in README
 
@@ -250,7 +251,7 @@ def test_readme_avoids_unsupported_release_claims(claim):
     assert claim not in README.lower()
 
 
-def test_docs_contain_no_machine_paths_credentials_or_benchmark_results():
+def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims():
     texts = [
         README,
         *(path.read_text() for path in sorted(EXAMPLES.iterdir()) if path.is_file()),
@@ -261,7 +262,13 @@ def test_docs_contain_no_machine_paths_credentials_or_benchmark_results():
     assert re.search(r"[A-Za-z]:\\\\Users\\\\", combined) is None
     assert re.search(r"\bsk-[A-Za-z0-9_-]{8,}", combined) is None
     assert "BEGIN PRIVATE KEY" not in combined
-    assert re.search(r"MemGov-Bench.{0,80}(?:%|passes|score: [1-9])", combined, re.I) is None
+    assert "two independently labelled synthetic cases per dimension" in README
+    assert "No external vendor adapter or model-based evaluation is implemented" in README
+    assert not re.search(
+        r"(?:Mem0|Zep|Letta).{0,80}(?:scored|passes|failed|outperform|superior)",
+        combined,
+        re.I,
+    )
 
 
 def test_local_markdown_links_resolve():
@@ -323,6 +330,15 @@ def test_temporary_editable_install_exposes_and_runs_documented_entry_points(tmp
         text=True,
     )
     assert hashlib.sha256(module.stdout.encode()).hexdigest() == DEMO_HASH
+    benchmark = subprocess.run(
+        [str(python), "-m", "memgov_bench", "--adapter", "ours"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Overall: **PASS**" in benchmark.stdout
+    assert benchmark.stderr == ""
     for script in ("epistemic-memory-demo", "epistemic-memory-mcp"):
         executable = bin_dir / script
         assert executable.is_file()

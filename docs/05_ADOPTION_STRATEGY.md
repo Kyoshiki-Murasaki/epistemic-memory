@@ -33,6 +33,26 @@ by defining what "good" means.
 (Anthropic-model note baked into the harness design: run each scenario 3× and report
 variance; single-run LLM benchmarks are rightly distrusted.)
 
+### Canonical M11 implementation
+
+M11 ships the self-scored minimum required by `docs/02_SPEC.md`: ten original synthetic cases,
+two per dimension, through `python -m memgov_bench --adapter ours`. The reference adapter wraps
+only public `MemoryStore` APIs. Static fixture expectations are independent of implementation
+output, and each case runs against fresh temporary state with fixed UTC time and deterministic
+IDs. There are no network or model calls.
+
+A case passes only when the complete typed observation matches its frozen expectation. A
+dimension passes only when all its cases pass, and overall passes only when all five dimensions
+pass in each of exactly three complete runs. Harness errors are separate from valid benchmark
+failures. The observed M11 result was 2/2 cases in every dimension in every run: mean, minimum,
+and maximum 100.00%, variance 0.0000 percentage-points squared, with no correctness differences
+between runs.
+
+This is a deterministic conformance result for a finite synthetic suite, not statistical
+generalization, performance evidence, or a production-readiness claim. The Mem0, Zep, and Letta
+adapters described above remain stretch goals; M11 does not implement or score any external
+vendor.
+
 ## Play 2: make trying it cheaper than reading about it
 
 Adoption of dev infrastructure follows the path of least resistance:
