@@ -1,0 +1,72 @@
+version: 1
+
+status_strength:
+  system_verified: 100
+  corroborated: 80
+  user_stated: 50
+  promised: 45
+  planned: 40
+  considering: 30
+  third_party_stated: 30
+  ai_inferred: 20
+  mentioned: 10
+  disputed: 5
+  superseded: 0
+  retracted: 0
+  do_not_use: 0
+
+# This example intentionally recognizes only one low-privilege source type.
+source_status_ceiling:
+  user: user_stated
+
+# IDs are exact provenance principals, not source-type wildcards.
+source_principals:
+  user: user
+
+trust_matrix:
+  preferred_name:
+    rule_id: EX-PREFERRED-NAME
+    authoritative: [user]
+    ranking: [user]
+
+risk_tiers: [informational, low_stakes, high_stakes, irreversible]
+
+gate_rules:
+  informational:
+    rule_id: EX-GATE-INFORMATIONAL
+    min_status: mentioned
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: false
+  low_stakes:
+    rule_id: EX-GATE-LOW-STAKES
+    min_status: user_stated
+    require_authoritative_source: false
+    require_uncontradicted: false
+    require_current: true
+  high_stakes:
+    rule_id: EX-GATE-HIGH-STAKES
+    min_status: corroborated
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+  irreversible:
+    rule_id: EX-GATE-IRREVERSIBLE
+    min_status: system_verified
+    require_authoritative_source: true
+    require_uncontradicted: true
+    require_current: true
+
+actions:
+  update_preferred_name:
+    risk: low_stakes
+    decision: preferred_name
+
+agents:
+  support-agent:
+    max_action_tier: low_stakes
+    allowed_scopes: [global]
+    commitment_operations: []
+    memory_operations: [correct, explain, propose]
+    ingest_source_ids: [user]
+    writable_source_ids: [user]

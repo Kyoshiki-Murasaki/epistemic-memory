@@ -1,8 +1,9 @@
 # PLAN — Epistemic Memory pilot
 
-Status: **M0–M6 complete and provenance-authority-audited (193 tests passing). M6 adds explicit correction and
-graph-mutation authority, typed scoped artifacts, a deterministic dependency
-DAG, and atomic hidden-scope-safe correction propagation.**
+Status: **M0–M10 complete (329 tests passing). M10 makes the README the authoritative
+release entry point, adds least-privileged executable examples, and binds documentation claims
+to code, schemas, the deterministic demo, and isolated-install checks. MemGov-Bench and later
+milestones are not implemented.**
 Authority order: `02_SPEC.md` is the single source of truth (success criteria section governs
 the final gate); `AI Memory System.markdown` is the WHY where the spec is silent.
 
@@ -512,10 +513,47 @@ M9 intentionally does not add a general CLI, scheduler, remote MCP transport, UI
 live connector, or README launch material. The MCP smoke normalizes its transient identifiers out
 of the transcript; the canonical direct/propose/ephemeral paths use the fixed demo clock and IDs.
 
-- **M10 — README.** open with the spec's mission statement verbatim, then the pitch, the
-  governance comparison table vs Mem0/Zep/Letta (incl. multi-agent permissions), MCP quick-start
-  (3 commands), demo GIF/asciinema instructions, and a contributor-facing roadmap on the core API.
-  → verify: manual read; links resolve; comparison table + MCP quick-start present.
+- **M10 — release documentation and launch readiness. (done)** `README.md` now opens with the
+  binding mission verbatim and is the authoritative entry point for capabilities, the deterministic
+  demo/hash, clean installation, exact six-tool stdio MCP setup/reference, the Python API, session
+  modes, policy, architecture/trust boundaries, threat model, restrained Mem0/Zep/Letta category
+  positioning, limitations, and contribution paths. `examples/trust_policy.yaml` is a separate
+  least-privileged one-source policy; `examples/bootstrap_store.py`,
+  `examples/python_quickstart.py`, and `examples/mcp_config.json` make local/MCP workflows
+  reproducible without secrets, test-only helpers, direct SQLite access, or a live service.
+  `tests/test_docs.py` adds 26 durable checks for mission/metadata/commands, demo hash and generated
+  excerpt, exact MCP schemas and host-only controls, example parsing/execution, policy semantics,
+  architecture/import boundaries, capability labels, forbidden claims/paths/secrets/benchmark
+  results, local links, code fences/shell syntax, and a dependency-resolving temporary editable
+  install that exposes both scripts. `pyproject.toml` required no change: its Python requirement,
+  dependencies, README metadata, version, and two console scripts were already factual and the
+  isolated install proved them.
+  → verified: focused docs **26 passed**; demo **28 passed**; MCP **13 passed**; audit/proposals/
+  ephemeral **60 passed**; propagation/commitments **106 passed**; policy/retrieve/assemble/ingest
+  **82 passed**; full suite **329 passed**. Two module demos and the console demo were byte-identical
+  at SHA-256 `4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc`.
+  Module/script `--help`, example execution, YAML semantic validation, JSON parsing, local-link and
+  forbidden-content checks, six-tool/schema consistency, SQLite/MCP boundary checks, `compileall`,
+  `pip check`, `git diff --check`, and a clean temporary venv install all passed.
+
+### M10 canonical deliverable map
+
+| Requirement | Implementation/source of truth | Verification evidence |
+|---|---|---|
+| Mission, pitch, status, concepts, limitations | `README.md`; `docs/02_SPEC.md`; accepted M1–M9 code/tests | mission/status/claim/link tests; full suite |
+| Demo instructions, excerpt, hash, recording | `README.md`; `epistemic_memory/demo.py`; `tests/test_demo.py` | two byte-identical module runs, console run, hash/excerpt test |
+| Five-minute install and release metadata | `README.md`; `pyproject.toml` | fresh dependency-resolving venv, both scripts, `pip check` |
+| Three-step MCP setup and six-tool reference | `README.md`; `examples/mcp_config.json`; `mcp_server.py` | official-client MCP tests plus schema/name consistency checks |
+| Python, proposal, ephemeral, correction examples | `examples/python_quickstart.py`; public `MemoryStore` models/methods | executable example and no-private-boundary static test |
+| Least-privileged policy guidance/bootstrap | `examples/trust_policy.yaml`; `examples/bootstrap_store.py`; `policy.py` | semantic load, exact-authority assertions, idempotent bootstrap |
+| Architecture and threat model | `README.md`; `core.py`; `store.py`; `mcp_server.py` | AST/import, read-only SQLite, and adapter-boundary checks |
+| Category comparison and contribution path | `README.md`; `docs/04_USER_RESEARCH.md`; `docs/05_ADOPTION_STRATEGY.md` | no unsupported/superiority/benchmark-result claim checks |
+| Documentation and release hygiene | `tests/test_docs.py`; this M10 record | 26 focused checks; 329-test full suite; clean diff checks |
+
+M10 deliberately leaves the pilot's known boundaries intact: local SQLite/FTS5, one-process
+operation, stdio-only MCP, host-controlled identity, optional live extraction, no hosted auth,
+remote transport, scheduler, UI, telemetry, cryptographic tamper evidence, declared license, or
+benchmark. M11 remains the first benchmark milestone and has not begun.
 
 - **M11 — MemGov-Bench (the category play; see `05_ADOPTION_STRATEGY.md`).** `memgov_bench/`:
   runnable `python -m memgov_bench --adapter ours` scoring five dimensions (stale-fact leakage,

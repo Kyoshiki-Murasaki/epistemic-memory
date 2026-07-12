@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "epistemic-memory": {
+      "type": "stdio",
+      "command": "epistemic-memory-mcp",
+      "args": [
+        "--db",
+        "${EPISTEMIC_MEMORY_DB}",
+        "--policy",
+        "${EPISTEMIC_MEMORY_POLICY}",
+        "--agent-id",
+        "support-agent",
+        "--session-mode",
+        "direct"
+      ],
+      "env": {}
+    }
+  }
+}
