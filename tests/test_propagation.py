@@ -35,7 +35,11 @@ from epistemic_memory.policy import load_policy
 from epistemic_memory.propagate import apply_propagation
 
 
-POLICY_PATH = str(Path(__file__).resolve().parents[1] / "trust_policy.yaml")
+POLICY_PATH = str(
+    Path(__file__).resolve().parents[1]
+    / "epistemic_memory"
+    / "trust_policy.yaml"
+)
 NOW = datetime(2026, 7, 11, 9, 30, tzinfo=timezone.utc)
 
 

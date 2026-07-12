@@ -1,11 +1,12 @@
 # SPEC — Epistemic Memory: a trust-and-governance memory layer for AI agents
 
-This spec turns the vision document (`AI_Memory_System.markdown`) into a concrete, buildable pilot.
+This spec turns the vision document ([`AI Memory System.markdown`](AI%20Memory%20System.markdown))
+into a concrete, buildable pilot.
 The vision doc is the WHY. This file is the WHAT. Read both before writing code.
 
 ## Mission (this is the project's north star — put it verbatim in the README)
 
-Build the default open-source memory foundation for AI: the thing developers use when they
+Build a governed memory foundation for AI: the thing developers use when they
 need AI systems to remember *safely*, not just remember more. This memory does not treat
 everything as a fact. It knows where information came from, how certain it is, where it is
 allowed to be used, whether it is still current, what disagrees with it, and whether it is
@@ -50,17 +51,14 @@ Existing memory systems answer "what do I remember?" — this foundation also an
 
 2b. **Supersession is structural, not similarity-based.** Every belief carries a structural
    key `(entity, attribute)` (e.g., `(customer_881, current_city)`), extracted by the LLM but
-   validated by the engine. Contradiction detection is a deterministic key match: same key,
-   different value, newer source ⇒ supersede per policy. Never detect contradictions via
-   embedding similarity — 2026 research (MemStrata, arXiv 2606.26511) shows embeddings cannot
-   separate "contradicts" from "restates" (near-chance AUROC), which is why flat vector
-   memories leak stale facts. This also gives version history for free: "what did the user
-   prefer last quarter" is a walk of the supersede chain — something Mem0 cannot answer.
+   validated by the engine. A newer different value from the same source supersedes the older
+   same-key belief. Cross-source disagreement remains live and is resolved by explicit policy.
+   Contradiction handling is structural rather than embedding-similarity based; version history
+   remains walkable through the supersession chain.
 
 2c. **Every belief carries a scope.** `global | project:<id> | persona | task_type:<t>`.
    Context assembly filters by scope: a pixel-art preference scoped to the user's hobby
-   project must never be injected into their banking-website task. This addresses the #1
-   real-user complaint about existing memory: right memory, wrong context.
+   project must never be injected into their banking-website task.
 
 3. **Trust is per-decision, not per-source.** A YAML policy file defines a trust matrix:
    which source types are authoritative for which decision types. Billing system outranks the
@@ -78,14 +76,14 @@ Existing memory systems answer "what do I remember?" — this foundation also an
    owner, beneficiary, deadline, preconditions, and proof-of-completion link. They surface
    proactively; they don't rot inside a list of memories.
 
-6. **Corrections propagate.** Every derived artifact (summary, decision, pending action,
-   another belief) stores the IDs of the beliefs it depends on. When a belief is invalidated,
+6. **Corrections propagate.** Every registered derived artifact (summary, decision, or action)
+   stores the IDs of the beliefs or upstream artifacts it depends on. When a belief is invalidated,
    the system walks this dependency graph and: marks dependents stale, halts pending actions
    built on it, and lists already-executed actions that may need human review.
 
-7. **Every answer is auditable.** Each agent response/action writes a trace: which beliefs
-   were injected, their statuses, which trust rule resolved each conflict, which gate rule
-   allowed the action, and what would change if a given belief were removed.
+7. **Durable answer, action, and write paths are auditable.** Context assembly, action gating,
+   and domain mutations write immutable traces with their decision-time evidence and policy.
+   Raw retrieval is intentionally untraced because it does not authorize an answer or action.
 
 ## The LLM-facing insight (the most important implementation detail)
 
@@ -110,7 +108,7 @@ layer** is where this system wins or loses:
 - **Meter the weight.** Log and print tokens injected per turn. If memory makes the agent
   slower and heavier, users disable it — weight is a first-class metric, not an afterthought.
 
-## User-trust features (from real-user research — see 04_USER_RESEARCH.md)
+## User-trust features (motivated by the exploratory source review in 04_USER_RESEARCH.md)
 
 - **No silent writes.** Every belief commit is logged and inspectable. A `--propose` mode
   queues extracted beliefs for explicit user approval instead of auto-committing.
@@ -128,7 +126,7 @@ A single-machine Python project. No Docker, no Postgres, no vector DB, no queue.
 
 **Stack:** Python 3.11+, SQLite (stdlib `sqlite3`, FTS5 for keyword retrieval), Pydantic v2
 models, Anthropic API (`claude-sonnet-5`) for extraction/classification, the official
-`mcp` Python SDK for the MCP server, `pytest`, a `rich` CLI. FastAPI + a minimal read-only
+`mcp` Python SDK for the MCP server, and `pytest`. FastAPI + a minimal read-only
 inspector UI is a stretch goal, not the core.
 
 **Components:**
@@ -137,14 +135,14 @@ inspector UI is a stretch goal, not the core.
 1. `ingest` — append raw event; LLM extracts candidate beliefs + proposed status; engine
    validates against enum/policy before commit.
 2. `store` — SQLite schema: `events`, `beliefs` (with `supersedes_id`, `status`, `source_id`,
-   `valid_from/valid_to`), `sources`, `commitments`, `dependencies`, `audit_traces`.
+   `valid_from`), `sources`, `commitments`, `dependencies`, `audit_traces`.
 3. `policy` — loads `trust_policy.yaml` (trust matrix + gate rules); pure functions:
    `resolve_conflict(beliefs, decision_type)`, `gate(action, supporting_beliefs)`.
 4. `retrieve` — FTS5 + filters (entity, task type, status floor); returns ranked beliefs.
 5. `assemble` — renders the epistemic context block + permissions block described above.
 6. `gatekeeper` — the action gate; returns `allow | deny | needs_human` with reasons.
 7. `propagate` — dependency-graph walker for corrections/invalidations.
-8. `audit` — writes and pretty-prints traces; `explain(response_id)` answers "why?"
+8. `audit` — writes and renders traces; `explain(trace_id)` answers "why?"
 9. `mcp_server` — exposes the core API as MCP tools (`memory_ingest`, `memory_retrieve`,
    `memory_assemble_context`, `memory_gate_action`, `memory_explain`, `memory_correct`)
    with per-agent identity, so any MCP-capable agent can share one governed memory.
@@ -185,7 +183,8 @@ contributors to build adapters ON the core API — that is how a foundation grow
 
 - `pytest` suite covering: status transitions, supersede-not-delete, conflict resolution per
   policy, gate decisions per tier, commitment state machine, propagation marking dependents.
-- `python -m demo` runs the full scenario above and exits 0, printing readable traces.
+- `python -m epistemic_memory.demo` runs the full scenario above and exits 0, printing readable
+  traces.
 - Grepping the codebase for any path that UPDATEs an event row or hard-deletes a belief
   returns nothing (immutability holds).
 - A wrong answer in the demo can always be traced to a belief, a status, or a policy rule via

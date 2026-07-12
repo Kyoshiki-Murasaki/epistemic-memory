@@ -1,24 +1,27 @@
 # The exact prompt to paste into Claude Code
 
+> Historical planning artifact: this prompt records the original greenfield build workflow.
+> For current installation and verification, use the repository README.
+
 Setup first (5 minutes):
 ```bash
 mkdir epistemic-memory && cd epistemic-memory
 git init
 mkdir docs
-# copy AI_Memory_System.markdown and 02_SPEC.md into docs/
+# copy "AI Memory System.markdown" and 02_SPEC.md into docs/
 claude
 ```
 Then paste everything below the line as your first message.
 
 ---
 
-You are building the pilot of **Epistemic Memory** — an open-source memory *foundation* for
+You are building the pilot of **Epistemic Memory** — a governed memory *foundation* for
 AI: a common, governed memory layer that many agents and tools can share, which knows where
 information came from, how certain it is, where it may be used, whether it is current, what
 disagrees with it, and whether it is strong enough to act on. This is a greenfield project.
-Three documents in `docs/` define it:
+Four documents in `docs/` define it:
 
-- `docs/AI_Memory_System.markdown` — the vision: why this is different from Mem0/Zep/Letta.
+- `docs/AI Memory System.markdown` — the vision and motivation.
 - `docs/02_SPEC.md` — the binding technical spec: architecture, components, stack, demo
   scenario, and success criteria.
 - `docs/04_USER_RESEARCH.md` — real-user pain points with existing memory tools; explains
@@ -46,7 +49,8 @@ what you'd build, STOP and ask me — do not guess silently.
 
 ## Milestones (put these in PLAN.md, refine as needed)
 
-- M0: repo scaffold, pyproject, README stub, `trust_policy.yaml` with the demo's rules.
+- M0: repo scaffold, pyproject, README stub, `epistemic_memory/trust_policy.yaml` with the
+  demo's rules.
 - M1: `core` — the `MemoryStore` interface + Pydantic models. This is the project's ONLY
   public API; design it first and keep it small. Then store: schema, append-only event log,
   versioned beliefs with `supersedes`. Tests prove immutability (no UPDATE on events, no
@@ -69,7 +73,8 @@ what you'd build, STOP and ask me — do not guess silently.
 - M8: MCP server — expose the core API as MCP tools with per-agent identity, using the
   official `mcp` Python SDK. Verify: server starts, tools list, and a scripted second agent
   with read-only/informational permissions is correctly limited by policy.
-- M9: `python -m demo` — the full scripted support scenario from the spec (all 11 steps,
+- M9: `python -m epistemic_memory.demo` — the full scripted support scenario from the spec
+  (all 11 steps,
   including the scope-leak, injection, and multi-agent tests), with rich, readable
   step-by-step output, memory receipts, and token counts. The showpiece; make it beautiful.
 - M10: README for GitHub — open with the mission statement from the spec verbatim, then the
@@ -82,9 +87,9 @@ what you'd build, STOP and ask me — do not guess silently.
   memory-safety benchmark with five dimensions: stale-fact leakage, claim/fact confusion,
   scope leakage, injection resistance, gate correctness. Deterministic scripted scenarios,
   pass/fail scoring, run 3× with variance reported. Ship with an adapter interface and a
-  reference adapter for our own system; adapters for Mem0/Letta open-source SDKs as stretch
-  (stub them cleanly if their APIs can't express a dimension — "cannot express" is itself a
-  reportable result). Output: a markdown scores table the README embeds.
+  reference adapter for our own system. External adapters are future work and must not be
+  stubbed, scored, or compared until they have reproducible implementations and independent
+  expectations. Output: a markdown scores table the README embeds.
 
 ## Hard constraints
 
@@ -94,7 +99,8 @@ what you'd build, STOP and ask me — do not guess silently.
 - Retrieval never implies permission. Every action path goes through the gate.
 - All access goes through the `MemoryStore` core API with an `agent_id`. No client — CLI,
   MCP server, or demo — touches SQLite directly.
-- No cloud services, no Docker, no external DB. `pip install -e .` then `python -m demo`
+- No cloud services, no Docker, no external DB. `pip install -e .` then
+  `python -m epistemic_memory.demo`
   must work on a clean machine (with ANTHROPIC_API_KEY optional thanks to fixtures).
 
 Start now with M0 + PLAN.md + proposed schema, then pause for my review.

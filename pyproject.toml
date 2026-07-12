@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
     "pyyaml>=6.0",
-    "rich>=13.7",
     "anthropic>=0.40",
     "mcp>=1.28.1,<2",
 ]
@@ -24,9 +23,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["epistemic_memory*", "demo*", "memgov_bench*"]
+include = ["epistemic_memory*", "memgov_bench*"]
 
 [tool.setuptools.package-data]
+epistemic_memory = ["schema.sql", "trust_policy.yaml"]
 memgov_bench = ["data/*.json", "data/*.yaml"]
 
 [tool.pytest.ini_options]

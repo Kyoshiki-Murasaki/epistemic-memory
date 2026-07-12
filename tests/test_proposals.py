@@ -28,7 +28,7 @@ from epistemic_memory.store import StoreSchemaError
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = str(ROOT / "trust_policy.yaml")
+POLICY_PATH = str(ROOT / "epistemic_memory" / "trust_policy.yaml")
 NOW = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
 
 

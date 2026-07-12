@@ -425,7 +425,7 @@ def create_server(
             correlation_id = (
                 state.next_fault_id() if state is not None else "mcp-internal-startup"
             )
-            LOGGER.exception("MCP tool internal fault [%s]", correlation_id)
+            LOGGER.error("MCP tool internal fault [%s]", correlation_id)
             return _boundary_failure(name, "internal_error")
 
     return server
@@ -490,8 +490,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         asyncio.run(run_server(create_server(config)))
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:
-        print(f"epistemic-memory-mcp: startup failed: {exc}", file=sys.stderr)
+    except Exception:
+        print("epistemic-memory-mcp: startup failed", file=sys.stderr)
         return 2
     return 0
 

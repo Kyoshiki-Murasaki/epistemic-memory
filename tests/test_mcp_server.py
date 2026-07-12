@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from epistemic_memory.policy import load_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = str(ROOT / "trust_policy.yaml")
+POLICY_PATH = str(ROOT / "epistemic_memory" / "trust_policy.yaml")
 PYTHON = sys.executable
 
 
@@ -718,10 +719,13 @@ def test_one_store_per_session_and_close_on_shutdown(tmp_path):
     assert counts == {"opened": 1, "closed": 1}
 
 
-def test_internal_fault_response_is_generic_and_non_leaking(tmp_path):
+def test_internal_fault_response_and_logs_are_generic_and_non_leaking(
+    tmp_path, caplog
+):
     path = tmp_path / "fault.db"
     _create_database(path)
     secret = f"SELECT secret FROM hidden; {path}"
+    caplog.set_level(logging.ERROR, logger="epistemic_memory.mcp")
 
     class FaultMemory(MemoryStore):
         def retrieve(self, request):
@@ -744,6 +748,39 @@ def test_internal_fault_response_is_generic_and_non_leaking(tmp_path):
         assert "Traceback" not in serialized
 
     asyncio.run(_with_in_memory_server(server, scenario))
+    assert "MCP tool internal fault [mcp-internal-0001]" in caplog.text
+    assert secret not in caplog.text
+    assert str(path) not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_startup_internal_fault_is_generic_and_non_leaking(
+    monkeypatch, capsys, tmp_path
+):
+    from epistemic_memory import mcp_server
+
+    secret = f"SELECT policy FROM hidden; {tmp_path}"
+
+    def fail_config(_args):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(mcp_server, "_config_from_args", fail_config)
+    result = mcp_server.main([
+        "--db",
+        str(tmp_path / "memory.db"),
+        "--policy",
+        str(tmp_path / "policy.yaml"),
+        "--agent-id",
+        "support-agent",
+    ])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "epistemic-memory-mcp: startup failed\n"
+    assert secret not in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_startup_help_import_and_both_entry_points_are_hygienic(tmp_path):

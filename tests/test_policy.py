@@ -28,7 +28,11 @@ from epistemic_memory.policy import (
     resolve_conflict,
 )
 
-POLICY_PATH = str(Path(__file__).resolve().parent.parent / "trust_policy.yaml")
+POLICY_PATH = str(
+    Path(__file__).resolve().parent.parent
+    / "epistemic_memory"
+    / "trust_policy.yaml"
+)
 
 
 # =========================== pure-function tests ============================

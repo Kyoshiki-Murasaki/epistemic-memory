@@ -23,7 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 README = README_PATH.read_text()
 EXAMPLES = ROOT / "examples"
+PUBLIC_DOC_PATHS = (
+    README_PATH,
+    ROOT / "PLAN.md",
+    *sorted(
+        path
+        for path in (ROOT / "docs").iterdir()
+        if path.suffix.lower() in {".md", ".markdown"}
+    ),
+)
 DEMO_HASH = "4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc"
+BENCHMARK_HASH = "ebacd6df735e81a51585500873b2703576d45f19d39c3321017959752db4884f"
 DEMO_EXCERPT = """STEP 4 — Refund request fails closed
 Input
   "Issue refund for order 4411"
@@ -253,7 +263,7 @@ def test_readme_avoids_unsupported_release_claims(claim):
 
 def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims():
     texts = [
-        README,
+        *(path.read_text() for path in PUBLIC_DOC_PATHS),
         *(path.read_text() for path in sorted(EXAMPLES.iterdir()) if path.is_file()),
     ]
     combined = "\n".join(texts)
@@ -262,6 +272,12 @@ def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims(
     assert re.search(r"[A-Za-z]:\\\\Users\\\\", combined) is None
     assert re.search(r"\bsk-[A-Za-z0-9_-]{8,}", combined) is None
     assert "BEGIN PRIVATE KEY" not in combined
+    assert "spin" "diaco" not in combined.lower()
+    assert "python -m demo" not in combined
+    assert "AI_Memory_System.markdown" not in combined
+    assert "open-source memory foundation" not in combined.lower()
+    assert "MIT license" not in combined
+    assert "everything is open" not in combined.lower()
     assert "two independently labelled synthetic cases per dimension" in README
     assert "No external vendor adapter or model-based evaluation is implemented" in README
     assert not re.search(
@@ -272,16 +288,26 @@ def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims(
 
 
 def test_local_markdown_links_resolve():
-    targets = re.findall(r"\[[^\]]+\]\(([^)]+)\)", README)
-    local = [target.split("#", 1)[0] for target in targets if "://" not in target]
-    assert local
-    missing = [target for target in local if not (ROOT / unquote(target)).exists()]
+    checked = []
+    missing = []
+    for document in PUBLIC_DOC_PATHS:
+        targets = re.findall(r"\[[^\]]+\]\(([^)]+)\)", document.read_text())
+        for target in targets:
+            relative = target.split("#", 1)[0]
+            if not relative or "://" in relative or relative.startswith("mailto:"):
+                continue
+            checked.append((document, relative))
+            if not (document.parent / unquote(relative)).exists():
+                missing.append((document, relative))
+    assert checked
     assert missing == []
 
 
 def test_code_fences_balance_and_bash_blocks_parse():
-    assert README.count("```") % 2 == 0
-    bash_blocks = re.findall(r"```bash\n(.*?)\n```", README, re.DOTALL)
+    public_docs = "\n".join(path.read_text() for path in PUBLIC_DOC_PATHS)
+    for path in PUBLIC_DOC_PATHS:
+        assert path.read_text().count("```") % 2 == 0
+    bash_blocks = re.findall(r"```bash\n(.*?)\n```", public_docs, re.DOTALL)
     assert bash_blocks
     for block in bash_blocks:
         result = subprocess.run(
@@ -305,7 +331,7 @@ def test_examples_do_not_bypass_public_boundary_or_embed_sql():
         )
 
 
-def test_temporary_editable_install_exposes_and_runs_documented_entry_points(tmp_path):
+def test_temporary_wheel_install_exposes_and_runs_documented_entry_points(tmp_path):
     environment = tmp_path / "venv"
     subprocess.run(
         [sys.executable, "-m", "venv", str(environment)],
@@ -316,20 +342,30 @@ def test_temporary_editable_install_exposes_and_runs_documented_entry_points(tmp
     bin_dir = environment / ("Scripts" if os.name == "nt" else "bin")
     python = bin_dir / ("python.exe" if os.name == "nt" else "python")
     subprocess.run(
-        [str(python), "-m", "pip", "install", "-e", str(ROOT)],
-        cwd=ROOT,
+        [str(python), "-m", "pip", "install", str(ROOT)],
+        cwd=tmp_path,
         check=True,
         capture_output=True,
         text=True,
     )
     module = subprocess.run(
         [str(python), "-m", "epistemic_memory.demo"],
-        cwd=ROOT,
+        cwd=tmp_path,
         check=True,
         capture_output=True,
         text=True,
     )
     assert hashlib.sha256(module.stdout.encode()).hexdigest() == DEMO_HASH
+    demo_script = bin_dir / "epistemic-memory-demo"
+    script = subprocess.run(
+        [str(demo_script)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert script.stdout == module.stdout
+    assert script.stderr == ""
     benchmark = subprocess.run(
         [str(python), "-m", "memgov_bench", "--adapter", "ours"],
         cwd=tmp_path,
@@ -338,15 +374,40 @@ def test_temporary_editable_install_exposes_and_runs_documented_entry_points(tmp
         text=True,
     )
     assert "Overall: **PASS**" in benchmark.stdout
+    assert hashlib.sha256(benchmark.stdout.encode()).hexdigest() == BENCHMARK_HASH
     assert benchmark.stderr == ""
-    for script in ("epistemic-memory-demo", "epistemic-memory-mcp"):
-        executable = bin_dir / script
+    schema_smoke = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "from epistemic_memory.core import MemoryStore; "
+            "from epistemic_memory.demo import POLICY_PATH; "
+            "from epistemic_memory.policy import load_policy; "
+            "memory = MemoryStore(':memory:', load_policy(str(POLICY_PATH)), "
+            "agent_id='support-agent'); memory.close()",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert schema_smoke.stdout == schema_smoke.stderr == ""
+    for script_name in ("epistemic-memory-demo", "epistemic-memory-mcp"):
+        executable = bin_dir / script_name
         assert executable.is_file()
         help_result = subprocess.run(
             [str(executable), "--help"],
-            cwd=ROOT,
+            cwd=tmp_path,
             check=True,
             capture_output=True,
             text=True,
         )
         assert "usage:" in help_result.stdout
+    pip_check = subprocess.run(
+        [str(python), "-m", "pip", "check"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "No broken requirements found" in pip_check.stdout

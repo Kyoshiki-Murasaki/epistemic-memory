@@ -24,7 +24,7 @@ from epistemic_memory.policy import load_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = ROOT / "trust_policy.yaml"
+POLICY_PATH = ROOT / "epistemic_memory" / "trust_policy.yaml"
 
 
 @pytest.fixture(scope="module")

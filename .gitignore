@@ -4,10 +4,25 @@ __pycache__/
 build/
 dist/
 .venv/
+venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .DS_Store
+.idea/
+.vscode/
+.env
+.env.*
 
 # local scratch databases produced by the demo / tests
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
+
+# temporary deterministic-output captures
+epistemic-memory-demo*.txt
+memgov-bench*.txt

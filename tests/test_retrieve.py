@@ -421,7 +421,9 @@ def test_fts_startup_backfills_legacy_rows_idempotently_without_mutation(
     legacy.commit()
     legacy.close()
 
-    policy = load_policy(str(Path(__file__).parents[1] / "trust_policy.yaml"))
+    policy = load_policy(str(
+        Path(__file__).parents[1] / "epistemic_memory" / "trust_policy.yaml"
+    ))
     request = RetrievalRequest(query="LEGACY", scope="project:banking")
 
     first_store = MemoryStore(str(db_path), policy, agent_id="support-agent")

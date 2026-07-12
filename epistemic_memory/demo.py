@@ -55,7 +55,7 @@ from .rendering import safe_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = ROOT / "trust_policy.yaml"
+POLICY_PATH = Path(__file__).with_name("trust_policy.yaml")
 START = datetime(2026, 7, 12, 9, 0, tzinfo=timezone.utc)
 HOBBY_MARKER = "PIXEL_ART_HOBBY_MARKER"
 HIDDEN_ARTIFACT_MARKER = "HIDDEN_HOBBY_ACTION_MARKER"

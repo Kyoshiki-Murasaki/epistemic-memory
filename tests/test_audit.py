@@ -47,7 +47,7 @@ from epistemic_memory.policy import load_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = str(ROOT / "trust_policy.yaml")
+POLICY_PATH = str(ROOT / "epistemic_memory" / "trust_policy.yaml")
 NOW = datetime(2026, 7, 11, 10, 0, tzinfo=timezone.utc)
 GOLDEN = Path(__file__).parent / "golden" / "m7_explain_payment_conflict.txt"
 

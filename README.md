@@ -1,6 +1,6 @@
 # Epistemic Memory
 
-> Build the default open-source memory foundation for AI: the thing developers use when they
+> Build a governed memory foundation for AI: the thing developers use when they
 > need AI systems to remember *safely*, not just remember more. This memory does not treat
 > everything as a fact. It knows where information came from, how certain it is, where it is
 > allowed to be used, whether it is still current, what disagrees with it, and whether it is
@@ -404,7 +404,8 @@ prevents silent belief commitment rather than making the entire session non-pers
 
 ## Policy configuration
 
-[`trust_policy.yaml`](trust_policy.yaml) is the full deterministic demo policy.
+[`epistemic_memory/trust_policy.yaml`](epistemic_memory/trust_policy.yaml) is the full
+deterministic demo policy packaged with the library.
 [`examples/trust_policy.yaml`](examples/trust_policy.yaml) is the safer starting point: it has
 one exact user source, global read scope, and a low-stakes ceiling.
 
@@ -520,8 +521,9 @@ git diff --check
 ```
 
 The documentation tests parse both examples, execute the Python workflows, compare the README's
-tool list to the actual MCP schemas, verify the demo hash/excerpt, check local links and forbidden
-claims/paths, and perform a temporary editable-install smoke test. The suite intentionally avoids
+tool list to the actual MCP schemas, verify the demo hash/excerpt, check public documentation links
+and forbidden claims/paths, and perform a temporary wheel-install smoke test outside the checkout.
+The suite intentionally avoids
 embedding a passing-test count in the README so adding legitimate coverage does not make the
 release status stale.
 
@@ -556,6 +558,6 @@ verification block before submitting changes.
 ## Release and license status
 
 Package metadata reports version `0.1.0` and Python `>=3.11`. No license file or license metadata
-is currently declared; do not assume reuse terms that the repository has not granted. This M11
-checkpoint remains local: it does not publish a package or benchmark, create a hosted release, or
-push a remote branch.
+is currently declared; do not assume reuse terms that the repository has not granted. Publishing
+this repository does not publish a Python package or benchmark service, create a GitHub Release,
+or deploy a hosted service.

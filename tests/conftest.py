@@ -7,7 +7,11 @@ from epistemic_memory.core import MemoryStore
 from epistemic_memory.models import Belief, EpistemicStatus, Source, TrustPolicy
 from epistemic_memory.policy import load_policy
 
-POLICY_PATH = str(Path(__file__).resolve().parent.parent / "trust_policy.yaml")
+POLICY_PATH = str(
+    Path(__file__).resolve().parent.parent
+    / "epistemic_memory"
+    / "trust_policy.yaml"
+)
 
 
 @pytest.fixture

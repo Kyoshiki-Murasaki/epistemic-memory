@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Verify installation and source
+        run: |
+          python -m pip check
+          python -m compileall epistemic_memory memgov_bench
+          python -m pytest -q
+
+      - name: Verify deterministic demo
+        run: |
+          python -m epistemic_memory.demo > "$RUNNER_TEMP/epistemic-memory-demo.txt"
+          test "$(sha256sum "$RUNNER_TEMP/epistemic-memory-demo.txt" | awk '{print $1}')" = "4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc"
+
+      - name: Verify canonical benchmark
+        run: |
+          python -m memgov_bench --adapter ours > "$RUNNER_TEMP/memgov-bench.txt"
+          test "$(sha256sum "$RUNNER_TEMP/memgov-bench.txt" | awk '{print $1}')" = "ebacd6df735e81a51585500873b2703576d45f19d39c3321017959752db4884f"

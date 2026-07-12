@@ -60,9 +60,8 @@ supporting tables:
 Plus a `beliefs_fts` FTS5 virtual table for M4 retrieval. All minimal; flagging for visibility.
 
 ### D4 — Extraction model id
-Spec says `claude-sonnet-4-6`, which isn't a current model id. I'll default the (behind-a-flag)
-live extractor to **`claude-sonnet-5`** as a single constant. Tests never call it — they use
-JSON fixtures. Change the constant if you want a different model.
+The optional live extractor and spec use **`claude-sonnet-5`** as a single constant. Tests never
+call it; deterministic fixtures cover the default test, demo, and benchmark paths.
 
 ### D5 — Multi-agent / core-API additions — schema impact ≈ none *(confirmed)*
 The refreshed `03_CLAUDE_CODE_PROMPT.md` reframes the project as a shared *foundation* and adds a
@@ -211,8 +210,9 @@ CREATE TABLE proposals (
 );
 ```
 
-Ephemeral (no-write) sessions need no schema: a runtime flag makes every commit path a logged
-no-op while retrieval still works.
+Ephemeral sessions need no additional schema. The host selects `SessionMode.ephemeral`, the
+existing database opens with storage-level read-only enforcement, writes return typed denials,
+and answer/action traces remain instance-local rather than durable.
 
 ---
 
@@ -351,19 +351,20 @@ tool (`memory_<verb>`, with `assemble`→`memory_assemble_context` and `gate`→
 
 ```python
 class MemoryStore:
-    def __init__(self, db_path, policy, *, agent_id, ephemeral=False, propose=False): ...
+    def __init__(self, db_path, policy, *, agent_id,
+                 session_mode=SessionMode.direct, session_id=None,
+                 approval_actor_id=None, live=False, clock=None,
+                 id_factory=None, trusted_sources=None): ...
 
     # ingest (M2) — append raw event, extract+validate+commit beliefs (or queue if propose=True)
     def ingest(self, *, source_id, content, scope, meta=None) -> IngestResult: ...
 
     # retrieve (M4) — agent_id-scoped, scope-filtered ranked beliefs; no rendering, no gating
-    def retrieve(self, *, query, entity=None, scope, task_type=None,
-                 status_floor=None) -> list[Belief]: ...
+    def retrieve(self, request: RetrievalRequest) -> RetrievalResult: ...
 
     # assemble (M4) — retrieve() + epistemic headers, conflict flags, permissions block,
     # dedup, token budget/metering, memory receipt
-    def assemble(self, *, query, entity=None, scope, task_type=None,
-                 token_budget=1024) -> AssembledContext: ...
+    def assemble(self, request: AssemblyRequest) -> AssembledContext: ...
 
     # gate (M3/M4) — the action gate; never bypassable; respects the agent's
     # action tier and the active task/agent scope intersection. Missing scope
@@ -371,7 +372,7 @@ class MemoryStore:
     # decision_type is NOT a param: derived from policy.actions[action].decision (by
     # convention in this pilot, decision_type == the belief attribute name), so a
     # caller can never pass a decision_type inconsistent with the action itself.
-    def gate(self, *, action, entity, scope, task_type=None) -> GateResult: ...
+    def gate(self, *, action, entity, scope=None, task_type=None) -> GateResult: ...
 
     # M6 — explicit artifact graph registration and atomic correction propagation
     def register_artifact(self, request: ArtifactRegistrationRequest
@@ -381,7 +382,7 @@ class MemoryStore:
     def correct(self, request: CorrectionRequest) -> CorrectionResult: ...
 
     # explain (M7) — why-chain for a trace id
-    def explain(self, trace_id) -> str: ...
+    def explain(self, request: ExplainRequest) -> ExplainResult: ...
 
     # commitments (M5) — typed operations on the same public service boundary
     def add_commitment(
@@ -405,8 +406,11 @@ class MemoryStore:
 
 ## 3. Milestones (each ends with its verification actually run)
 
-- **M0 — scaffold.** pyproject, README stub, `.gitignore`, `trust_policy.yaml`, this PLAN.
-  → verify: `python -c "import yaml,pathlib; yaml.safe_load(open('trust_policy.yaml'))"` loads;
+- **M0 — scaffold.** pyproject, README stub, `.gitignore`,
+  `epistemic_memory/trust_policy.yaml`, this PLAN.
+  → verify:
+  `python -c "import yaml,pathlib; yaml.safe_load(open('epistemic_memory/trust_policy.yaml'))"`
+  loads;
   files present. **(done)**
 
 - **M1 — core + store.** `models.py`; `store.py` = SQLite DAL (`add_source`, `add_event`,
@@ -466,13 +470,13 @@ class MemoryStore:
 
 - **M7 — audit + trust modes.** `audit.py` (`explain(trace_id)`), `--propose` approval queue,
   ephemeral no-write sessions. No silent commits anywhere.
-  → verify: `pytest tests/test_audit.py tests/test_trust_modes.py` — `explain` prints the
-  why-chain; `--propose` leaves nothing committed until approval; ephemeral writes nothing.
+  → verify: `pytest tests/test_audit.py tests/test_proposals.py tests/test_ephemeral.py` —
+  `explain` returns the why-chain; proposal mode commits no belief until approval; ephemeral
+  operation leaves application state unchanged.
 
 - **M8 — MCP server.** `mcp_server.py`: expose the `MemoryStore` API as MCP tools with per-agent
-  identity, using the official `mcp` SDK (added as an `epistemic-memory[mcp]` extra so the demo
-  stays key/dep-light).
-  → verify: `pytest tests/test_mcp.py` — server starts, tools list, and a scripted second agent
+  identity, using the official `mcp` SDK as a runtime dependency.
+  → verify: `pytest tests/test_mcp_server.py` — server starts, tools list, and a scripted second agent
   with read-only/informational permissions is correctly limited by policy.
 
 - **M9 — deterministic demo. (done)** `epistemic_memory/demo.py` runs the binding **11-step**
@@ -524,10 +528,10 @@ of the transcript; the canonical direct/propose/ephemeral paths use the fixed de
   `tests/test_docs.py` adds 26 durable checks for mission/metadata/commands, demo hash and generated
   excerpt, exact MCP schemas and host-only controls, example parsing/execution, policy semantics,
   architecture/import boundaries, capability labels, forbidden claims/paths/secrets/benchmark
-  results, local links, code fences/shell syntax, and a dependency-resolving temporary editable
-  install that exposes both scripts. `pyproject.toml` required no change: its Python requirement,
-  dependencies, README metadata, version, and two console scripts were already factual and the
-  isolated install proved them.
+  results, local links, code fences/shell syntax, and a dependency-resolving temporary install
+  that exposes both scripts. At M10, `pyproject.toml` required no change. The final publication
+  audit later upgraded this regression to a wheel-style install, declared the schema and packaged
+  demo policy as package data, and removed the unused `rich` dependency and package glob.
   → verified: focused docs **26 passed**; demo **28 passed**; MCP **13 passed**; audit/proposals/
   ephemeral **60 passed**; propagation/commitments **106 passed**; policy/retrieve/assemble/ingest
   **82 passed**; full suite **329 passed**. Two module demos and the console demo were byte-identical
@@ -588,8 +592,8 @@ license, or benchmark. M11 adds only the finite local benchmark described below.
   `4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc` all passed.
 
 **Final gate:** run the entire `02_SPEC.md` "Success criteria" section and paste output —
-full `pytest`, `python -m demo` exit 0, the immutability grep returns nothing, and every wrong
-demo answer traces via `explain`.
+full `pytest`, `python -m epistemic_memory.demo` exits 0, the immutability grep returns nothing,
+and every wrong demo answer traces via `explain`.
 
 ---
 

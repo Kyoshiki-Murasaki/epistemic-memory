@@ -27,7 +27,11 @@ from epistemic_memory.models import (
 )
 from epistemic_memory.policy import load_policy
 
-POLICY_PATH = str(Path(__file__).resolve().parents[1] / "trust_policy.yaml")
+POLICY_PATH = str(
+    Path(__file__).resolve().parents[1]
+    / "epistemic_memory"
+    / "trust_policy.yaml"
+)
 CREATED = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
 DEADLINE = CREATED + timedelta(days=5)
 
