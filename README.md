@@ -22,6 +22,14 @@ The system does not decide factual truth in the abstract. It applies explicit pr
 scope, status, and action policy to decide how stored claims may be interpreted and used.
 This repository is a deterministic reference implementation and local SQLite pilot.
 
+## Repository
+
+Canonical repository: https://github.com/Kyoshiki-Murasaki/epistemic-memory
+
+```bash
+git clone https://github.com/Kyoshiki-Murasaki/epistemic-memory.git
+```
+
 ## Why another memory layer?
 
 Retrieving a sentence is not the same as establishing that it is current, authoritative for

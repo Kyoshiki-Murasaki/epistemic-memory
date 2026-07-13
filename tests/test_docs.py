@@ -22,6 +22,7 @@ from epistemic_memory.policy import load_policy
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 README = README_PATH.read_text()
+PYPROJECT_PATH = ROOT / "pyproject.toml"
 EXAMPLES = ROOT / "examples"
 PUBLIC_DOC_PATHS = (
     README_PATH,
@@ -32,6 +33,29 @@ PUBLIC_DOC_PATHS = (
         if path.suffix.lower() in {".md", ".markdown"}
     ),
 )
+PUBLIC_PROJECT_PATHS = (
+    ROOT / ".gitignore",
+    README_PATH,
+    ROOT / "PLAN.md",
+    PYPROJECT_PATH,
+    *sorted(
+        path
+        for directory in (
+            ROOT / ".github",
+            ROOT / "docs",
+            EXAMPLES,
+            ROOT / "epistemic_memory",
+            ROOT / "memgov_bench",
+            ROOT / "tests",
+        )
+        for path in directory.rglob("*")
+        if path.is_file()
+        and path.suffix.lower()
+        in {".json", ".md", ".markdown", ".py", ".sql", ".txt", ".yaml", ".yml"}
+    ),
+)
+CANONICAL_REPOSITORY_URL = "https://github.com/Kyoshiki-Murasaki/epistemic-memory"
+CANONICAL_CLONE_URL = f"{CANONICAL_REPOSITORY_URL}.git"
 DEMO_HASH = "4b49f0a69cb03bf8396feca897ce3e153087eba43b8a86b19874995db7c58fcc"
 BENCHMARK_HASH = "ebacd6df735e81a51585500873b2703576d45f19d39c3321017959752db4884f"
 DEMO_EXCERPT = """STEP 4 — Refund request fails closed
@@ -70,7 +94,7 @@ def test_readme_opens_with_binding_mission_verbatim():
 
 
 def test_readme_references_current_install_and_console_commands():
-    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    metadata = tomllib.loads(PYPROJECT_PATH.read_text())["project"]
     assert metadata["requires-python"] == ">=3.11"
     scripts = metadata["scripts"]
     assert scripts == {
@@ -86,6 +110,13 @@ def test_readme_references_current_install_and_console_commands():
         "python -m memgov_bench --adapter ours",
     ):
         assert command in README
+
+
+def test_canonical_repository_urls_are_published():
+    metadata = tomllib.loads(PYPROJECT_PATH.read_text())["project"]
+    assert re.search(rf"{re.escape(CANONICAL_REPOSITORY_URL)}(?!\.git)", README)
+    assert f"git clone {CANONICAL_CLONE_URL}" in README
+    assert metadata["urls"]["Repository"] == CANONICAL_REPOSITORY_URL
 
 
 def test_demo_command_hash_and_readme_excerpt_are_current(demo_transcript):
@@ -261,15 +292,17 @@ def test_readme_avoids_unsupported_release_claims(claim):
     assert claim not in README.lower()
 
 
-def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims():
+def test_docs_and_metadata_contain_no_machine_paths_credentials_or_external_benchmark_claims():
     texts = [
+        PYPROJECT_PATH.read_text(),
         *(path.read_text() for path in PUBLIC_DOC_PATHS),
         *(path.read_text() for path in sorted(EXAMPLES.iterdir()) if path.is_file()),
     ]
     combined = "\n".join(texts)
-    assert "/Users/" not in combined
-    assert "/home/" not in combined
-    assert re.search(r"[A-Za-z]:\\\\Users\\\\", combined) is None
+    assert "/" + "Users/" not in combined
+    assert "/" + "home/" not in combined
+    windows_users = "\\" + "Users" + "\\"
+    assert re.search(r"[A-Za-z]:" + re.escape(windows_users), combined) is None
     assert re.search(r"\bsk-[A-Za-z0-9_-]{8,}", combined) is None
     assert "BEGIN PRIVATE KEY" not in combined
     assert "spin" "diaco" not in combined.lower()
@@ -285,6 +318,11 @@ def test_docs_contain_no_machine_paths_credentials_or_external_benchmark_claims(
         combined,
         re.I,
     )
+
+
+def test_public_project_files_exclude_wrong_identity():
+    combined = "\n".join(path.read_text() for path in PUBLIC_PROJECT_PATHS)
+    assert "spin" "diaco" not in combined.lower()
 
 
 def test_local_markdown_links_resolve():

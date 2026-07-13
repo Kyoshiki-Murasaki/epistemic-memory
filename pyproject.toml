@@ -11,6 +11,9 @@ dependencies = [
     "mcp>=1.28.1,<2",
 ]
 
+[project.urls]
+Repository = "https://github.com/Kyoshiki-Murasaki/epistemic-memory"
+
 [project.scripts]
 epistemic-memory-mcp = "epistemic_memory.mcp_server:main"
 epistemic-memory-demo = "epistemic_memory.demo:main"
